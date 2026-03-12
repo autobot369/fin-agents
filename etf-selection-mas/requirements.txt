@@ -1,0 +1,22 @@
+# Global ETF Top-20 Boom List MAS
+# ================================
+# Python >= 3.11 required (for list[str] union syntax in type hints)
+
+# ── LangGraph / LangChain ─────────────────────────────────────────────────
+langgraph>=0.2.0
+langchain-anthropic>=0.3.0
+langchain-core>=0.3.0
+anthropic>=0.40.0
+
+# ── Market data ───────────────────────────────────────────────────────────
+yfinance>=0.2.40               # ETF prices, AUM, expense ratio, .news feed
+pandas>=2.0.0
+
+# ── News / web search (100% free — no API key required) ───────────────────
+duckduckgo-search>=6.0.0       # DDGS: macro queries + ticker-level news
+
+# ── Output formatting ─────────────────────────────────────────────────────
+tabulate>=0.9.0                # Optional: terminal table helper
+
+# ── Utilities ─────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0           # .env loading for ANTHROPIC_API_KEY

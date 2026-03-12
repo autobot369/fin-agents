@@ -1,0 +1,23 @@
+# 6-Node SIP Execution MAS — Gemini Edition
+# Shared with simulator: yfinance, pandas, python-dotenv
+
+# Data + finance
+yfinance>=0.2.40
+pandas>=2.0.0
+python-dotenv>=1.0.0
+
+# LangGraph
+langgraph>=0.2.0
+
+# Gemini SDK
+google-generativeai>=0.8.0
+
+# No-LLM fallback sentiment (used in researcher pre-processing)
+vaderSentiment>=3.3.2
+duckduckgo-search>=6.0.0
+
+# Optional: Alpaca paper trading (Node 5)
+# alpaca-py>=0.21.0
+
+# SSL certs
+certifi>=2024.0.0

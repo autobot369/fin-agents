@@ -71,3 +71,54 @@ class SimulationResult(TypedDict):
     monthly_snapshots: List[MonthlySnapshot]
     holdings: Dict[str, ETFHolding]   # ticker → holding
     skipped_tickers: List[str]        # tickers with no price data
+
+
+# ── Month-by-month backtest types ─────────────────────────────────────────────
+
+class BacktestPosition(TypedDict):
+    """One ETF position within a single backtest month."""
+    ticker: str
+    name: str
+    bucket: str           # "core" | "satellite"
+    region: str           # "BSE" | "US" | "HKCN"
+    category: str
+    consensus_score: float
+    sentiment_score: float
+    expense_score: float
+    weight: float         # fraction of total SIP
+    monthly_usd: float    # USD allocated this month
+    price_native: float   # buy price in native currency (USD or INR)
+    units_bought: float
+    currency: str         # "USD" | "INR"
+
+
+class BacktestMonthEntry(TypedDict):
+    """Research + investment record for a single calendar month."""
+    month: str                     # "YYYY-MM"
+    date: str                      # "YYYY-MM-DD" (first trading day used as buy date)
+    sip_amount: float
+    core_budget: float
+    satellite_budget: float
+    total_invested_usd: float
+    positions: List[BacktestPosition]
+    boom_triggers: List[str]
+    macro_summary: str
+    scorer: str                    # "gemini" | "vader"
+    usd_inr_rate: float
+
+
+class HistoricalBacktestResult(TypedDict):
+    """Full result of the month-by-month historical backtest."""
+    start_date: str                        # "YYYY-MM-DD"
+    end_date: str                          # "YYYY-MM-DD"
+    months_run: int
+    sip_amount: float
+    total_invested_usd: float
+    current_value_usd: float
+    total_pnl_usd: float
+    total_return_pct: float
+    cagr: float
+    usd_inr_rate: float
+    monthly_entries: List[BacktestMonthEntry]
+    holdings: Dict[str, Any]              # ticker → holding info dict
+    skipped_months: List[str]             # months where research failed entirely

@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Optional
+from datetime import date as _Date
+from typing import Any, Dict, List, Optional, Tuple
 
 from sip_execution_mas.graph.state import SIPExecutionState
 
@@ -139,22 +140,40 @@ def _build_user_prompt(
     return "\n".join(lines)
 
 
-# ── Node function ─────────────────────────────────────────────────────────────
+# ── Extracted scorer — callable from both node and backtest ───────────────────
 
-def signal_scorer_node(state: SIPExecutionState) -> dict:
+def score_etfs(
+    filtered_tickers: List[str],
+    all_etf_data: Dict[str, Any],
+    all_macro_news: Dict[str, List[str]],
+    reference_date: Optional[_Date] = None,
+) -> Tuple[Dict[str, float], List[str], str]:
     """
-    Node 2 — Signal Scorer
+    Score ETF sentiment via Gemini (with optional date isolation) or VADER.
 
-    Calls Gemini to score sentiment for each filtered ETF.
-    Falls back to VADER on API failure.
+    Args:
+        filtered_tickers: Tickers to score.
+        all_etf_data:     ETF metrics dict (from regional_researcher output).
+        all_macro_news:   Headlines per region (from regional_researcher output).
+        reference_date:   None → production (no date constraint in prompt).
+                          date → backtest (Gemini instructed to evaluate as-of that date).
+
+    Returns:
+        (sentiment_scores, boom_triggers, macro_summary)
     """
-    filtered_tickers = state["filtered_tickers"]
-    all_etf_data     = state["all_etf_data"]
-    all_macro_news   = state["all_macro_news"]
+    # Build system prompt — inject date header for backtest mode
+    if reference_date:
+        month_year  = reference_date.strftime("%B %Y")
+        iso         = reference_date.isoformat()
+        date_header = (
+            "SIMULATION MODE: You are scoring as of {my} ({iso}).\n"
+            "Score based ONLY on the provided news articles and ETF metrics.\n"
+            "Do NOT incorporate market events, earnings, or macro changes from after {iso}.\n\n"
+        ).format(my=month_year, iso=iso)
+        system_prompt = date_header + _SYSTEM_PROMPT
+    else:
+        system_prompt = _SYSTEM_PROMPT
 
-    print(f"\n[Node 2] Signal Scorer — scoring {len(filtered_tickers)} ETFs via Gemini …")
-
-    # ── Try Gemini ────────────────────────────────────────────────
     sentiment_scores: Dict[str, float] = {}
     boom_triggers: List[str] = []
     macro_summary = ""
@@ -163,40 +182,63 @@ def signal_scorer_node(state: SIPExecutionState) -> dict:
     try:
         model = _get_gemini_model()
         user_content = _build_user_prompt(filtered_tickers, all_etf_data, all_macro_news)
-        full_prompt = _SYSTEM_PROMPT + "\n\n" + user_content
+        full_prompt  = system_prompt + "\n\n" + user_content
 
         response = model.generate_content(full_prompt)
-        parsed = _parse_json(response.text)
+        parsed   = _parse_json(response.text)
 
         raw_scores = parsed.get("scores", {})
         for ticker in filtered_tickers:
             val = raw_scores.get(ticker)
-            if val is not None:
-                sentiment_scores[ticker] = max(0.0, min(1.0, float(val)))
-            else:
-                sentiment_scores[ticker] = 0.50   # default if Gemini missed it
+            sentiment_scores[ticker] = (
+                max(0.0, min(1.0, float(val))) if val is not None else 0.50
+            )
 
         boom_triggers = parsed.get("boom_triggers", [])
         macro_summary = parsed.get("macro_summary", "")
 
     except EnvironmentError as exc:
-        print(f"  [Node 2] ⚠  {exc} — falling back to VADER")
+        print(f"  [scorer] ⚠  {exc} — falling back to VADER")
         used_fallback = True
     except Exception as exc:
-        print(f"  [Node 2] ⚠  Gemini error: {exc} — falling back to VADER")
+        print(f"  [scorer] ⚠  Gemini error: {exc} — falling back to VADER")
         used_fallback = True
 
     if used_fallback:
         sentiment_scores = _vader_fallback(filtered_tickers, all_macro_news)
-        macro_summary = "Macro scores computed via VADER sentiment (Gemini unavailable)."
-        boom_triggers = []
+        macro_summary    = "Macro scores computed via VADER sentiment (Gemini unavailable)."
+        boom_triggers    = []
 
-    # ── Print summary ─────────────────────────────────────────────
     source = "VADER fallback" if used_fallback else "Gemini"
-    print(f"  [Node 2] Scores via {source}")
+    date_tag = f" [as-of {reference_date}]" if reference_date else ""
+    print(f"  [scorer] Scores via {source}{date_tag}")
     if boom_triggers:
-        print(f"  [Node 2] Boom triggers: {', '.join(boom_triggers)}")
-    print(f"  [Node 2] Macro: {macro_summary[:120]}")
+        print(f"  [scorer] Boom triggers: {', '.join(boom_triggers)}")
+    print(f"  [scorer] Macro: {macro_summary[:120]}")
+
+    return sentiment_scores, boom_triggers, macro_summary
+
+
+# ── Node function (thin wrapper around score_etfs) ────────────────────────────
+
+def signal_scorer_node(state: SIPExecutionState) -> dict:
+    """
+    Node 2 — Signal Scorer.
+    Delegates to score_etfs(); threads as_of_date from state for backtest support.
+    """
+    filtered_tickers = state["filtered_tickers"]
+    all_etf_data     = state["all_etf_data"]
+    all_macro_news   = state["all_macro_news"]
+    reference_date   = state.get("as_of_date")   # None in production
+
+    print(f"\n[Node 2] Signal Scorer — scoring {len(filtered_tickers)} ETFs …")
+
+    sentiment_scores, boom_triggers, macro_summary = score_etfs(
+        filtered_tickers = filtered_tickers,
+        all_etf_data     = all_etf_data,
+        all_macro_news   = all_macro_news,
+        reference_date   = reference_date,
+    )
 
     return {
         "sentiment_scores": sentiment_scores,

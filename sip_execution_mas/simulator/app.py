@@ -56,6 +56,13 @@ def _ter(v) -> str:
     return f"{v*100:.3f}%" if v else "N/A"
 
 
+def _color_val(val: Any) -> str:
+    """Pandas Styler: green for non-negative numbers, red for negative."""
+    if isinstance(val, (int, float)):
+        return "color: #2ECC71" if val >= 0 else "color: #E74C3C"
+    return ""
+
+
 @st.cache_data(show_spinner=False)
 def _load_ledger_cached(path: str) -> Dict[str, Any]:
     return load_ledger(path)
@@ -228,6 +235,54 @@ with st.sidebar:
 
     st.divider()
 
+    # ── Backtest panel ────────────────────────────────────────────────────────
+    st.subheader("🔬 Backtest")
+    bt_mode = st.toggle(
+        "Enable Backtest",
+        value=st.session_state.get("bt_mode", False),
+        help="Simulate month-by-month SIP over a historical period",
+    )
+    st.session_state["bt_mode"] = bt_mode
+
+    if bt_mode:
+        bt_start = st.date_input(
+            "Start date",
+            value=datetime(datetime.now().year - 1, 1, 1).date(),
+            key="sb_bt_start",
+        )
+        bt_end = st.date_input(
+            "End date",
+            value=datetime.now().date(),
+            key="sb_bt_end",
+        )
+        bt_day = st.number_input(
+            "Day of month (SIP date)",
+            min_value=1, max_value=27, value=1, step=1,
+            help="Day within each month on which to execute the SIP",
+            key="sb_bt_day",
+        )
+        bt_sip = st.number_input(
+            "Monthly SIP (USD)",
+            min_value=50.0, max_value=50000.0,
+            value=500.0, step=50.0,
+            key="sb_bt_sip",
+        )
+
+        run_bt = st.button("▶ Run Backtest", type="primary", use_container_width=True)
+
+        if run_bt:
+            if bt_start >= bt_end:
+                st.error("Start must be before end date.")
+            else:
+                st.session_state["bt_running"] = {
+                    "start": bt_start,
+                    "end":   bt_end,
+                    "day":   int(bt_day),
+                    "sip":   bt_sip,
+                }
+
+    st.divider()
+
     if st.button("🔄 Refresh data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -236,77 +291,347 @@ with st.sidebar:
 #  Guard — need at least one ledger entry
 # ══════════════════════════════════════════════════════════════════════════════
 
-if summary["months"] == 0:
+if summary["months"] == 0 and not st.session_state.get("bt_mode"):
     st.title("📊 SIP Simulator")
     st.info(
         "**No investment records found yet.**\n\n"
         "Run the scheduler to record your first monthly investment:\n"
         "```bash\npython -m simulator.scheduler --now\n```\n\n"
-        "Then click **🔄 Refresh data** in the sidebar."
+        "Then click **🔄 Refresh data** in the sidebar, or use the **🔬 Backtest** "
+        "toggle to simulate a historical SIP without ledger data."
     )
     st.stop()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Load & enrich data
+#  Load & enrich data  (only when ledger has entries)
 # ══════════════════════════════════════════════════════════════════════════════
 
-ledger   = _load_ledger_cached(ledger_path)
-holdings = aggregate_holdings(ledger)
-tickers  = tuple(sorted(holdings.keys()))
+_has_ledger = summary["months"] > 0
 
-with st.spinner("Fetching live prices …"):
-    prices = _fetch_current_prices(tickers)
+if _has_ledger:
+    ledger   = _load_ledger_cached(ledger_path)
+    holdings = aggregate_holdings(ledger)
+    tickers  = tuple(sorted(holdings.keys()))
 
-holdings_enriched, totals = _compute_current_value(holdings, prices, ledger)
-boom_triggers = []
-if os.path.exists(str(_DEFAULT_RANKINGS)):
-    with open(str(_DEFAULT_RANKINGS)) as f:
-        boom_triggers = json.load(f).get("boom_triggers_fired", [])
+    with st.spinner("Fetching live prices …"):
+        prices = _fetch_current_prices(tickers)
+
+    holdings_enriched, totals = _compute_current_value(holdings, prices, ledger)
+    boom_triggers = []
+    if os.path.exists(str(_DEFAULT_RANKINGS)):
+        with open(str(_DEFAULT_RANKINGS)) as f:
+            boom_triggers = json.load(f).get("boom_triggers_fired", [])
+
+    # ── Header + top metrics ──────────────────────────────────────────────────
+    st.title("📊 SIP Simulator — Portfolio Dashboard")
+    st.caption(
+        f"Last investment: **{summary['last_investment']}**  ·  "
+        f"Live prices as of: **{datetime.now().strftime('%Y-%m-%d %H:%M')}**  ·  "
+        f"USD/INR: **{totals['usd_inr']:.2f}**  ·  buy-only"
+    )
+
+    if boom_triggers:
+        st.info("🚀  **Active Boom Triggers:** " + "  ·  ".join(f"`{t}`" for t in boom_triggers))
+
+    pnl = totals["total_pnl"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Invested",    _usd(totals["total_invested"]))
+    c2.metric(
+        "Portfolio Value",
+        _usd(totals["current_value"]),
+        delta=f"+{_usd(pnl)}" if pnl and pnl >= 0 else (_usd(pnl) if pnl else "—"),
+    )
+    c3.metric(
+        "Total Return",
+        _pct(totals["total_return_pct"]) if totals["total_return_pct"] is not None else "—",
+        delta=_pct(totals["total_return_pct"]) if totals["total_return_pct"] is not None else None,
+        delta_color="normal" if pnl and pnl >= 0 else "inverse",
+    )
+    c4.metric("Months Invested", str(summary["months"]))
+
+    st.divider()
+
+    # ── Tabs ──────────────────────────────────────────────────────────────────
+    tab_portfolio, tab_holdings, tab_history, tab_allocation, tab_timeline = st.tabs([
+        "🗂 Portfolio",
+        "💼 Holdings",
+        "📒 Ledger History",
+        "📐 Last Allocation",
+        "📅 Timeline",
+    ])
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Header + top metrics
+#  Backtest panel  (sidebar-triggered; renders even when no ledger entries)
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.title("📊 SIP Simulator — Portfolio Dashboard")
-st.caption(
-    f"Last investment: **{summary['last_investment']}**  ·  "
-    f"Live prices as of: **{datetime.now().strftime('%Y-%m-%d %H:%M')}**  ·  "
-    f"USD/INR: **{totals['usd_inr']:.2f}**  ·  buy-only"
-)
+if st.session_state.get("bt_mode"):
 
-if boom_triggers:
-    st.info("🚀  **Active Boom Triggers:** " + "  ·  ".join(f"`{t}`" for t in boom_triggers))
+    # ── Execute if a run was requested ───────────────────────────────────────
+    if "bt_running" in st.session_state:
+        _params = st.session_state.pop("bt_running")
+        from simulator.backtest import run_historical_backtest
 
-pnl = totals["total_pnl"]
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Invested",    _usd(totals["total_invested"]))
-c2.metric(
-    "Portfolio Value",
-    _usd(totals["current_value"]),
-    delta=f"+{_usd(pnl)}" if pnl and pnl >= 0 else (_usd(pnl) if pnl else "—"),
-)
-c3.metric(
-    "Total Return",
-    _pct(totals["total_return_pct"]) if totals["total_return_pct"] is not None else "—",
-    delta=_pct(totals["total_return_pct"]) if totals["total_return_pct"] is not None else None,
-    delta_color="normal" if pnl and pnl >= 0 else "inverse",
-)
-c4.metric("Months Invested", str(summary["months"]))
+        _log_lines: list = []
+        with st.status("Running backtest …", expanded=True) as _status:
+            def _bt_progress(msg: str) -> None:
+                _log_lines.append(msg)
+                _status.write(msg)
 
-st.divider()
+            try:
+                _bt_result = run_historical_backtest(
+                    start_date        = _params["start"],
+                    end_date          = _params["end"],
+                    sip_amount        = _params["sip"],
+                    day_of_month      = _params["day"],
+                    progress_callback = _bt_progress,
+                )
+                st.session_state["backtest_result"] = _bt_result
+                _status.update(
+                    label="Backtest complete — {} months run.".format(_bt_result["months_run"]),
+                    state="complete",
+                )
+            except Exception as _exc:
+                _status.update(label="Backtest failed: {}".format(_exc), state="error")
+                st.error(str(_exc))
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Tabs
-# ══════════════════════════════════════════════════════════════════════════════
+    # ── Results ───────────────────────────────────────────────────────────────
+    if "backtest_result" in st.session_state:
+        r = st.session_state["backtest_result"]
 
-tab_portfolio, tab_holdings, tab_history, tab_allocation, tab_timeline = st.tabs([
-    "🗂 Portfolio",
-    "💼 Holdings",
-    "📒 Ledger History",
-    "📐 Last Allocation",
-    "📅 Timeline",
-])
+        st.divider()
+        st.header("🔬 Backtest Results")
+        st.caption(
+            "Period: **{}** → **{}**  ·  {} months  ·  "
+            "SIP ${:.0f}/month  ·  buy-only  ·  no future data leakage".format(
+                r["start_date"], r["end_date"], r["months_run"], r["sip_amount"],
+            )
+        )
 
+        # Summary metrics
+        bm1, bm2, bm3, bm4 = st.columns(4)
+        bm1.metric("Total Invested",  _usd(r["total_invested_usd"]))
+        bm2.metric(
+            "Portfolio Value",
+            _usd(r["current_value_usd"]),
+            delta=_usd(r["total_pnl_usd"]),
+            delta_color="normal" if r["total_pnl_usd"] >= 0 else "inverse",
+        )
+        bm3.metric("Total Return", _pct(r["total_return_pct"]))
+        bm4.metric("CAGR",         _pct(r["cagr"]))
+
+        if r["skipped_months"]:
+            st.warning("Skipped months: " + ", ".join(r["skipped_months"]))
+
+        # ── Chart A: Portfolio growth ─────────────────────────────────────────
+        st.subheader("Portfolio Growth vs Cumulative Investment")
+        _cum_inv   = 0.0
+        _cum_units: Dict[str, float] = {}
+        _tl_rows   = []
+
+        for _entry in r["monthly_entries"]:
+            _usd_inr_e = _entry["usd_inr_rate"]
+            _cum_inv  += _entry["total_invested_usd"]
+            for _pos in _entry["positions"]:
+                _t = _pos["ticker"]
+                _cum_units[_t] = _cum_units.get(_t, 0.0) + _pos["units_bought"]
+
+            _port_val = 0.0
+            for _pos in _entry["positions"]:
+                _u = _cum_units.get(_pos["ticker"], 0.0)
+                _p = _pos["price_native"]
+                if _p > 0:
+                    _port_val += (_u * _p / _usd_inr_e) if _pos["region"] == "BSE" else (_u * _p)
+
+            _tl_rows.append({
+                "Month":    _entry["month"],
+                "Invested": round(_cum_inv, 2),
+                "Value":    round(_port_val, 2),
+                "P&L":      round(_port_val - _cum_inv, 2),
+            })
+
+        if _tl_rows:
+            _bt_df = pd.DataFrame(_tl_rows)
+            _fig_growth = go.Figure()
+            _fig_growth.add_trace(go.Scatter(
+                x=_bt_df["Month"], y=_bt_df["Invested"],
+                name="Cumulative Invested",
+                line=dict(color="#888888", dash="dot", width=2),
+                hovertemplate="<b>%{x}</b><br>Invested: $%{y:,.2f}<extra></extra>",
+            ))
+            _fig_growth.add_trace(go.Scatter(
+                x=_bt_df["Month"], y=_bt_df["Value"],
+                name="Portfolio Value (est.)",
+                line=dict(color=CORE_COLOR, width=3),
+                fill="tonexty",
+                fillcolor="rgba(76,155,232,0.12)",
+                hovertemplate="<b>%{x}</b><br>Value: $%{y:,.2f}<extra></extra>",
+            ))
+            if r["current_value_usd"] and not _bt_df.empty:
+                _live_color = POSITIVE_COLOR if r["total_pnl_usd"] >= 0 else NEGATIVE_COLOR
+                _fig_growth.add_trace(go.Scatter(
+                    x=[_bt_df["Month"].iloc[-1]],
+                    y=[r["current_value_usd"]],
+                    mode="markers+text",
+                    marker=dict(size=12, color=_live_color, symbol="diamond"),
+                    text=["  Live: " + _usd(r["current_value_usd"])],
+                    textposition="middle right",
+                    name="Live Value",
+                    hoverinfo="skip",
+                ))
+            _fig_growth.update_layout(
+                paper_bgcolor=BG, plot_bgcolor=BG,
+                xaxis=dict(color="white", gridcolor=GRID),
+                yaxis=dict(color="white", gridcolor=GRID, tickprefix="$"),
+                legend=dict(font=dict(color="white")),
+                hovermode="x unified",
+                height=400,
+                margin=dict(t=20, b=20),
+            )
+            st.plotly_chart(_fig_growth, use_container_width=True)
+
+        # ── Chart B: Per-ETF returns ──────────────────────────────────────────
+        st.subheader("Per-ETF Returns (live prices)")
+        if r["holdings"]:
+            _h_rows = [
+                {
+                    "Ticker":   t,
+                    "Return %": h["return_pct"],
+                    "P&L ($)":  h["pnl_usd"],
+                    "Bucket":   h.get("bucket", "?").capitalize(),
+                    "Region":   h.get("region", "?"),
+                }
+                for t, h in r["holdings"].items()
+                if h.get("return_pct") is not None
+            ]
+            _h_df = pd.DataFrame(_h_rows).sort_values("Return %")
+            _fig_ret = go.Figure(go.Bar(
+                x=_h_df["Return %"], y=_h_df["Ticker"],
+                orientation="h",
+                marker_color=[POSITIVE_COLOR if v >= 0 else NEGATIVE_COLOR for v in _h_df["Return %"]],
+                customdata=_h_df[["P&L ($)", "Bucket"]].values,
+                hovertemplate=(
+                    "<b>%{y}</b><br>Return: %{x:.2f}%<br>"
+                    "P&L: $%{customdata[0]:,.2f}<br>Bucket: %{customdata[1]}<extra></extra>"
+                ),
+            ))
+            _fig_ret.add_vline(x=0, line_color="white", line_width=1, opacity=0.4)
+            _fig_ret.update_layout(
+                paper_bgcolor=BG, plot_bgcolor=BG,
+                xaxis=dict(color="white", gridcolor=GRID, ticksuffix="%"),
+                yaxis=dict(color="white"),
+                height=max(300, len(_h_df) * 40),
+                margin=dict(t=10, b=10),
+            )
+            st.plotly_chart(_fig_ret, use_container_width=True)
+
+        # ── Chart C: Monthly ETF selection heatmap ────────────────────────────
+        st.subheader("Monthly ETF Selection Heatmap")
+        _all_tickers_seen = sorted({
+            pos["ticker"]
+            for _entry in r["monthly_entries"]
+            for pos in _entry["positions"]
+        })
+        _hm_rows = [
+            [
+                {pos["ticker"]: pos["consensus_score"] for pos in _entry["positions"]}.get(t, 0.0)
+                for t in _all_tickers_seen
+            ]
+            for _entry in r["monthly_entries"]
+        ]
+        if _hm_rows and _all_tickers_seen:
+            _fig_hm = go.Figure(go.Heatmap(
+                z=_hm_rows,
+                x=_all_tickers_seen,
+                y=[e["month"] for e in r["monthly_entries"]],
+                colorscale="Blues",
+                zmin=0.0, zmax=1.0,
+                hovertemplate="<b>%{x}</b><br>%{y}<br>Score: %{z:.3f}<extra></extra>",
+            ))
+            _fig_hm.update_layout(
+                paper_bgcolor=BG, plot_bgcolor=BG,
+                xaxis=dict(color="white", tickangle=-45),
+                yaxis=dict(color="white"),
+                height=max(300, len(_hm_rows) * 35),
+                margin=dict(t=10, b=60),
+            )
+            st.plotly_chart(_fig_hm, use_container_width=True)
+
+        # ── Per-month expandable details ──────────────────────────────────────
+        st.subheader("Month-by-Month Details")
+        for _entry in reversed(r["monthly_entries"]):
+            _scorer_badge = "🤖 Gemini" if _entry["scorer"] == "gemini" else "📊 VADER"
+            with st.expander(
+                "**{}**  ·  {}  ·  {}  ·  {} positions  ·  {}".format(
+                    _entry["month"], _entry["date"],
+                    _usd(_entry["total_invested_usd"]),
+                    len(_entry["positions"]), _scorer_badge,
+                )
+            ):
+                st.dataframe(pd.DataFrame([
+                    {
+                        "Ticker":    p["ticker"],
+                        "Bucket":    p["bucket"].capitalize(),
+                        "Region":    p["region"],
+                        "Category":  p["category"],
+                        "Consensus": round(p["consensus_score"], 4),
+                        "Sentiment": round(p["sentiment_score"], 4),
+                        "Expense":   round(p["expense_score"], 4),
+                        "Weight %":  "{:.1f}%".format(p["weight"] * 100),
+                        "USD/mo":    p["monthly_usd"],
+                        "Price":     p["price_native"],
+                        "Currency":  p["currency"],
+                        "Units":     p["units_bought"],
+                    }
+                    for p in _entry["positions"]
+                ]), hide_index=True, use_container_width=True)
+                if _entry.get("boom_triggers"):
+                    st.caption("Boom triggers: " + "  ·  ".join(
+                        "`{}`".format(t) for t in _entry["boom_triggers"]
+                    ))
+                if _entry.get("macro_summary"):
+                    st.caption(_entry["macro_summary"])
+
+        # ── Holdings summary + download ───────────────────────────────────────
+        st.divider()
+        st.subheader("Aggregate Holdings")
+        if r["holdings"]:
+            _hold_df = pd.DataFrame([
+                {
+                    "Ticker":         t,
+                    "Name":           h.get("name", t),
+                    "Bucket":         h.get("bucket", "?").capitalize(),
+                    "Region":         h.get("region", "?"),
+                    "Units":          h["total_units"],
+                    "Price (native)": h["current_price_native"],
+                    "Currency":       h.get("currency", "USD"),
+                    "Invested ($)":   h["invested_usd"],
+                    "Value ($)":      h["value_usd"],
+                    "P&L ($)":        h["pnl_usd"],
+                    "Return %":       h["return_pct"],
+                }
+                for t, h in sorted(
+                    r["holdings"].items(),
+                    key=lambda x: x[1].get("return_pct", 0),
+                    reverse=True,
+                )
+            ])
+            st.dataframe(
+                _hold_df.style.map(_color_val, subset=["P&L ($)", "Return %"]),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+        st.download_button(
+            "⬇ Download Backtest JSON",
+            data=json.dumps(r, indent=2, default=str),
+            file_name="backtest_{}_{}.json".format(r["start_date"], r["end_date"]),
+            mime="application/json",
+        )
+
+# ── Stop here if no ledger — tab variables not defined below ─────────────────
+if not _has_ledger:
+    st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  TAB 1 — Portfolio overview
@@ -442,11 +767,6 @@ with tab_holdings:
         })
 
     df = pd.DataFrame(rows)
-
-    def _color_val(val):
-        if isinstance(val, (int, float)):
-            return "color: #2ECC71" if val >= 0 else "color: #E74C3C"
-        return ""
 
     st.dataframe(
         df.style.map(_color_val, subset=["P&L ($)", "Return %"]),
@@ -646,3 +966,5 @@ with tab_timeline:
 
         st.subheader("Month-by-Month Table")
         st.dataframe(tl_df.drop(columns=["Color"]), hide_index=True, use_container_width=True)
+
+

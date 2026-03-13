@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import date as _Date, datetime as _Datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import yfinance as yf
@@ -78,6 +79,29 @@ def _parse_json(text: str) -> Any:
         parts = text.split("```")
         text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
     return json.loads(text)
+
+
+# ── Dated prompt helper ───────────────────────────────────────────────────────
+
+def _build_dated_prompt(base_prompt: str, as_of_date: _Date) -> str:
+    """
+    Prepend a simulation-date header to any Gemini discovery prompt.
+    Instructs Gemini to recommend only ETFs that existed and were appropriate
+    as of as_of_date, without leaking knowledge of later events.
+    Production callers pass as_of_date=None and this function is never called.
+    """
+    month_year = as_of_date.strftime("%B %Y")
+    iso        = as_of_date.isoformat()
+    header = (
+        "SIMULATION MODE — you are making recommendations as of {my} ({iso}).\n"
+        "Rules:\n"
+        "  • Recommend only ETFs that existed and were listed as of {iso}.\n"
+        "  • Base TER, AUM, and liquidity figures on what was known in {my}.\n"
+        "  • Apply macro themes and interest-rate context as of {my}, not today.\n"
+        "  • Do NOT include ETFs launched, listed, or restructured after {iso}.\n"
+        "  • Do NOT reference events, data, or fund changes from after {iso}.\n\n"
+    ).format(my=month_year, iso=iso)
+    return header + base_prompt
 
 
 # ── Phase 1 Gemini Prompts ────────────────────────────────────────────────────
@@ -291,10 +315,11 @@ def _ask_gemini(prompt: str) -> List[Dict[str, Any]]:
     return data
 
 
-def _build_india_tier(ter_threshold: float) -> List[Dict[str, Any]]:
+def _build_india_tier(ter_threshold: float, as_of_date: Optional[_Date] = None) -> List[Dict[str, Any]]:
     """Ask Gemini for India BSE ETFs. Falls back to seed list."""
     try:
-        recs = _ask_gemini(_INDIA_PROMPT)
+        prompt = _build_dated_prompt(_INDIA_PROMPT, as_of_date) if as_of_date else _INDIA_PROMPT
+        recs = _ask_gemini(prompt)
         cleaned = []
         for r in recs:
             ticker = str(r.get("ticker") or "").strip()
@@ -319,10 +344,11 @@ def _build_india_tier(ter_threshold: float) -> List[Dict[str, Any]]:
         return _FALLBACK["BSE"]
 
 
-def _build_us_tier() -> List[Dict[str, Any]]:
+def _build_us_tier(as_of_date: Optional[_Date] = None) -> List[Dict[str, Any]]:
     """Ask Gemini for US core + thematic ETFs. Falls back to seed list."""
     try:
-        recs = _ask_gemini(_US_PROMPT)
+        prompt = _build_dated_prompt(_US_PROMPT, as_of_date) if as_of_date else _US_PROMPT
+        recs = _ask_gemini(prompt)
         cleaned = []
         for r in recs:
             ticker   = str(r.get("ticker") or "").upper().strip()
@@ -351,13 +377,14 @@ def _build_us_tier() -> List[Dict[str, Any]]:
         return _FALLBACK["US"]
 
 
-def _build_hk_proxy_tier() -> List[Dict[str, Any]]:
+def _build_hk_proxy_tier(as_of_date: Optional[_Date] = None) -> List[Dict[str, Any]]:
     """
     Ask Gemini for HK/China themes. Apply proxy decision logic:
     if |hk_ter - us_proxy_ter| < 0.10 → use US proxy (saves stamp duty).
     """
     try:
-        recs = _ask_gemini(_HK_PROXY_PROMPT)
+        prompt = _build_dated_prompt(_HK_PROXY_PROMPT, as_of_date) if as_of_date else _HK_PROXY_PROMPT
+        recs = _ask_gemini(prompt)
         selected = []
         for r in recs:
             hk_ter = float(r.get("hk_ter_pct") or 0.75)
@@ -418,12 +445,25 @@ def _build_hk_proxy_tier() -> List[Dict[str, Any]]:
 
 # ── yfinance enrichment ───────────────────────────────────────────────────────
 
-def _fetch_yfinance_batch(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+def _fetch_yfinance_batch(
+    tickers: List[str],
+    as_of_date: Optional[_Date] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Fetch price metrics and static info for each ticker.
+    as_of_date=None  → current data (production, uses period="1y").
+    as_of_date set   → historical slice ending at as_of_date (backtest).
+    """
     results: Dict[str, Dict[str, Any]] = {}
     for ticker in tickers:
         try:
-            tk   = yf.Ticker(ticker)
-            hist = tk.history(period="1y", auto_adjust=True)
+            tk = yf.Ticker(ticker)
+            if as_of_date:
+                start = (as_of_date - timedelta(days=400)).isoformat()
+                end   = (as_of_date + timedelta(days=1)).isoformat()
+                hist  = tk.history(start=start, end=end, auto_adjust=True)
+            else:
+                hist = tk.history(period="1y", auto_adjust=True)
             info: Dict[str, Any] = {}
             try:
                 info = tk.info or {}
@@ -475,16 +515,71 @@ def _fetch_yfinance_batch(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
 
 # ── News fetch ────────────────────────────────────────────────────────────────
 
-def _fetch_news(market_tickers: Dict[str, List[str]], max_per_query: int = 5) -> Dict[str, List[str]]:
+def _fetch_news(
+    market_tickers: Dict[str, List[str]],
+    max_per_query: int = 5,
+    as_of_date: Optional[_Date] = None,
+) -> Dict[str, List[str]]:
     """
     Fetch headlines targeted at the specific recommended tickers per market.
+    as_of_date=None  → latest news (production).
+    as_of_date set   → news filtered to articles published on or before as_of_date (backtest).
     """
     news: Dict[str, List[str]] = {}
-    context = {
-        "BSE":  "India NSE ETF Nifty Reliance Infrastructure RBI 2026",
-        "US":   "US ETF semiconductor AI market outlook NASDAQ 2026",
-        "HKCN": "China Hong Kong ETF market stimulus tech 2026",
-    }
+
+    # Build context strings — include month/year when backtesting for better DDG relevance
+    if as_of_date:
+        month_year = as_of_date.strftime("%B %Y")
+        context = {
+            "BSE":  f"India NSE ETF Nifty market news {month_year}",
+            "US":   f"US ETF semiconductor AI market outlook {month_year}",
+            "HKCN": f"China Hong Kong ETF market news {month_year}",
+        }
+        cutoff_dt = _Datetime.combine(as_of_date, _Datetime.max.time())
+        cutoff_ts = cutoff_dt.timestamp()
+    else:
+        context = {
+            "BSE":  "India NSE ETF Nifty Reliance Infrastructure RBI 2026",
+            "US":   "US ETF semiconductor AI market outlook NASDAQ 2026",
+            "HKCN": "China Hong Kong ETF market stimulus tech 2026",
+        }
+        cutoff_dt = cutoff_ts = None
+
+    # ── yfinance .news (date-stamped — backtest only, avoids unnecessary calls in production) ──
+    if as_of_date:
+        for market, tickers in market_tickers.items():
+            headlines: List[str] = []
+            for ticker in tickers[:4]:
+                try:
+                    for item in (yf.Ticker(ticker).news or []):
+                        # Handle old format (int timestamp) and new format (ISO string)
+                        pub_ts  = item.get("providerPublishTime", 0)
+                        pub_str = (item.get("content") or {}).get("pubDate", "")
+                        skip = False
+                        if pub_ts and isinstance(pub_ts, (int, float)):
+                            skip = float(pub_ts) > cutoff_ts
+                        elif pub_str:
+                            try:
+                                pub_dt = _Datetime.fromisoformat(
+                                    pub_str.replace("Z", "+00:00")
+                                ).replace(tzinfo=None)
+                                skip = pub_dt > cutoff_dt
+                            except Exception:
+                                pass
+                        if not skip:
+                            title = (
+                                (item.get("content") or {}).get("title")
+                                or item.get("title")
+                                or item.get("headline") or ""
+                            )
+                            if title and title not in headlines:
+                                headlines.append(title)
+                except Exception:
+                    pass
+                time.sleep(0.05)
+            news[market] = headlines[:max_per_query]
+
+    # ── DDGS news ─────────────────────────────────────────────────────────────
     try:
         try:
             from ddgs import DDGS
@@ -493,16 +588,35 @@ def _fetch_news(market_tickers: Dict[str, List[str]], max_per_query: int = 5) ->
 
         with DDGS() as ddgs:
             for market, tickers in market_tickers.items():
+                existing = news.get(market, [])
+                if len(existing) >= max_per_query:
+                    continue
                 sample = " ".join(tickers[:5])
                 q = f"{sample} {context.get(market, 'ETF market outlook')}"
                 try:
-                    results  = list(ddgs.news(q, max_results=max_per_query))
-                    news[market] = [r.get("title", "") for r in results if r.get("title")]
+                    results = list(ddgs.news(q, max_results=max_per_query * 4 if as_of_date else max_per_query))
+                    for r in results:
+                        if as_of_date:
+                            date_str = r.get("date", "")
+                            if date_str:
+                                try:
+                                    pub_dt = _Datetime.fromisoformat(
+                                        date_str.replace("Z", "+00:00")
+                                    ).replace(tzinfo=None)
+                                    if pub_dt > cutoff_dt:
+                                        continue
+                                except Exception:
+                                    pass  # unparseable date — include conservatively
+                        title = r.get("title", "")
+                        if title and title not in existing:
+                            existing.append(title)
+                    news[market] = existing[:max_per_query]
                 except Exception:
-                    news[market] = []
+                    news.setdefault(market, [])
+                time.sleep(0.4 if as_of_date else 0.0)
     except Exception:
         for m in market_tickers:
-            news[m] = []
+            news.setdefault(m, [])
     return news
 
 
@@ -515,15 +629,19 @@ def regional_researcher_node(state: SIPExecutionState) -> dict:
     Phase 1: Gemini discovers ETF universe across 3 tiers.
     Phase 2: yfinance validates metrics; cost attribution computed.
     Phase 3: Liquidity filter (ADV < $1M USD excluded); proxy flag; FX notation.
+
+    as_of_date in state → backtest mode (date-isolated data + prompts).
+    as_of_date absent   → production mode (current data, no date constraint).
     """
     ter_threshold = state["ter_threshold"]
+    as_of_date    = state.get("as_of_date")   # None in production
 
     print(f"\n[Node 1] Regional Alpha & Cost Orchestrator — building universe …")
 
     # ── Phase 1: Discover universe via Gemini ─────────────────────────────────
-    india_recs = _build_india_tier(ter_threshold)
-    us_recs    = _build_us_tier()
-    hk_recs    = _build_hk_proxy_tier()
+    india_recs = _build_india_tier(ter_threshold, as_of_date=as_of_date)
+    us_recs    = _build_us_tier(as_of_date=as_of_date)
+    hk_recs    = _build_hk_proxy_tier(as_of_date=as_of_date)
 
     market_recs: Dict[str, List[Dict[str, Any]]] = {
         "BSE":  india_recs,
@@ -534,8 +652,11 @@ def regional_researcher_node(state: SIPExecutionState) -> dict:
     print(f"[Node 1] Universe: {len(all_tickers)} candidates — fetching yfinance data …")
 
     # ── Phase 2: yfinance enrichment ──────────────────────────────────────────
-    raw        = _fetch_yfinance_batch(all_tickers)
-    macro_news = _fetch_news({m: [r["ticker"] for r in recs] for m, recs in market_recs.items()})
+    raw        = _fetch_yfinance_batch(all_tickers, as_of_date=as_of_date)
+    macro_news = _fetch_news(
+        {m: [r["ticker"] for r in recs] for m, recs in market_recs.items()},
+        as_of_date=as_of_date,
+    )
 
     etf_data:  Dict[str, ETFRecord] = {}
     filtered:  List[str]            = []

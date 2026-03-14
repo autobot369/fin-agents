@@ -80,7 +80,8 @@ class SIPExecutionState(TypedDict):
     │  Populates: all_etf_data, all_macro_news                      │
     └───────────────────────────────────────────────────────────────┘
     ┌─ Node 2: Signal Scorer (Gemini) ──────────────────────────────┐
-    │  Populates: sentiment_scores, macro_summary, boom_triggers    │
+    │  Populates: sentiment_scores, macro_summary, boom_triggers,   │
+    │             scorer_source                                     │
     └───────────────────────────────────────────────────────────────┘
     ┌─ Node 3: Portfolio Optimizer (Gemini + allocator) ────────────┐
     │  Populates: expense_scores, consensus_scores,                 │
@@ -121,6 +122,7 @@ class SIPExecutionState(TypedDict):
     sentiment_scores: Dict[str, float]          # ticker → 0.0–1.0
     macro_summary: str
     boom_triggers: List[str]
+    scorer_source: str                          # "gemini" | "vader"
 
     # ── Node 3 outputs ────────────────────────────────────────────
     expense_scores: Dict[str, float]            # ticker → 0.0–1.0

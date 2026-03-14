@@ -27,7 +27,7 @@ def _get_gemini_model():
         raise EnvironmentError("GEMINI_API_KEY not set")
     genai.configure(api_key=api_key)
     return genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
+        model_name="gemini-2.5-flash",
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
             temperature=0.1,
@@ -372,7 +372,7 @@ def signal_scorer_node(state: SIPExecutionState) -> dict:
 
     print(f"\n[Node 2] Signal Scorer — scoring {len(filtered_tickers)} ETFs …")
 
-    sentiment_scores, boom_triggers, macro_summary, _ = score_etfs(
+    sentiment_scores, boom_triggers, macro_summary, scorer_source = score_etfs(
         filtered_tickers = filtered_tickers,
         all_etf_data     = all_etf_data,
         all_macro_news   = all_macro_news,
@@ -383,4 +383,5 @@ def signal_scorer_node(state: SIPExecutionState) -> dict:
         "sentiment_scores": sentiment_scores,
         "boom_triggers":    boom_triggers,
         "macro_summary":    macro_summary,
+        "scorer_source":    scorer_source,
     }

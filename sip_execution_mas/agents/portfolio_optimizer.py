@@ -167,7 +167,7 @@ def _get_gemini_model():
         raise EnvironmentError("GEMINI_API_KEY not set")
     genai.configure(api_key=api_key)
     return genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
+        model_name="gemini-2.5-flash",
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
             temperature=0.2,
@@ -372,9 +372,14 @@ def _apply_violation_caps(
     for region, total in region_totals.items():
         if total > region_cap_usd:
             scale = region_cap_usd / total
-            for pos in all_positions:
-                if pos.get("region") == region:
-                    pos["monthly_usd"] = round(pos["monthly_usd"] * scale, 2)
+            region_positions = [p for p in all_positions if p.get("region") == region]
+            for pos in region_positions:
+                pos["monthly_usd"] = round(pos["monthly_usd"] * scale, 2)
+            # Snap rounding drift so the region total never exceeds the cap
+            drift = round(sum(p["monthly_usd"] for p in region_positions) - region_cap_usd, 2)
+            if drift > 0 and region_positions:
+                largest = max(region_positions, key=lambda p: p["monthly_usd"])
+                largest["monthly_usd"] = round(largest["monthly_usd"] - drift, 2)
 
     # Recompute weights
     total_invested = sum(p["monthly_usd"] for p in all_positions)

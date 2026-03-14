@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''simulator/app.py''\\).read\\(\\)\\); print\\(''OK''\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''simulator/app.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(cmd.exe /c \"cd /d C:\\\\Users\\\\Admin\\\\fin-agents && python -c \"\"import json; d=json.load\\(open\\(''sip_execution_mas/simulator/outputs/portfolio_ledger.json''\\)\\); [print\\(e.get\\(''date'',''?''\\), sorted\\(e.get\\(''positions'',{}\\).keys\\(\\)\\)\\) for e in d.get\\(''entries'',[]\\)]\"\"\")"
     ]
   }
 }

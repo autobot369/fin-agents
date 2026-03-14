@@ -15,10 +15,26 @@ Rules:
 
 from __future__ import annotations
 
+import io
+import sys
 import time
 import warnings
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
+
+# ── Windows console UTF-8 fix ─────────────────────────────────────────────────
+# Python on Windows defaults stdout/stderr to cp1252, which can't encode
+# Unicode arrows, em-dashes, etc. used in progress messages.
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import pandas as pd
 import yfinance as yf

@@ -43,14 +43,14 @@ def _patch_ssl() -> None:
 
 _patch_ssl()
 
-# ── Locked ETF Universe (v2 — matches production MAS) ─────────────────────────
-# Core bucket (70% of SIP) — broad market anchors + quality factor
+# ── Locked ETF Universe (v3 — matches production MAS) ─────────────────────────
+# Core bucket (70% of SIP) — broad market anchors
 CORE_UNIVERSE: List[str] = [
-    "VTI", "SPLG", "SPDW", "SPEM", "FLIN", "NIFTYBEES.NS", "QUAL",
+    "USCA", "SPDW", "SPEM", "FLIN", "NIFTYBEES.NS",
 ]
-# Satellite bucket (30% of SIP) — sectors, tech, green energy
+# Satellite bucket (30% of SIP) — thematic growth
 SATELLITE_UNIVERSE: List[str] = [
-    "XLK", "QQQM", "SOXQ", "ICLN", "USCA", "ESGV", "XLY",
+    "SOXQ", "XLK", "AVUV", "URNM", "CIBR", "SMIN", "XBI",
 ]
 
 # Ranker region mapping (INTL = US-listed, BSE = NSE India)
@@ -63,62 +63,58 @@ ALL_TICKERS = INTL_UNIVERSE + BSE_UNIVERSE
 
 TER_REGISTRY: Dict[str, float] = {
     # Core — broad market
-    "VTI":          0.0003,
-    "SPLG":         0.0002,
+    "USCA":         0.0007,
     "SPDW":         0.0004,
     "SPEM":         0.0007,
     "FLIN":         0.0019,
-    "QUAL":         0.0015,
     # Core — India NSE
     "NIFTYBEES.NS": 0.0004,
-    # Satellite — technology & sectors
-    "XLK":  0.0010,
-    "QQQM": 0.0015,
+    # Satellite — thematic growth
     "SOXQ": 0.0019,
-    "ICLN": 0.0042,
-    "USCA": 0.0010,
-    "ESGV": 0.0009,
-    "XLY":  0.0010,
+    "XLK":  0.0010,
+    "AVUV": 0.0025,
+    "URNM": 0.0083,
+    "CIBR": 0.0060,
+    "SMIN": 0.0074,
+    "XBI":  0.0035,
 }
 
 # ── ETF metadata (category, trade_on) ────────────────────────────────────────
 
 ETF_META: Dict[str, Dict[str, str]] = {
     # Core — broad market
-    "VTI":          {"category": "US Total Market",      "trade_on": "Alpaca",         "bucket": "core"},
-    "SPLG":         {"category": "US Large-Cap (S&P 500)","trade_on": "Alpaca",         "bucket": "core"},
-    "SPDW":         {"category": "Developed ex-US",      "trade_on": "Alpaca",         "bucket": "core"},
-    "SPEM":         {"category": "Emerging Markets",     "trade_on": "Alpaca",         "bucket": "core"},
-    "FLIN":         {"category": "India (US-listed)",    "trade_on": "Alpaca",         "bucket": "core"},
-    "QUAL":         {"category": "US Quality Factor",    "trade_on": "Alpaca",         "bucket": "core"},
+    "USCA":         {"category": "US Large-Cap Core",    "trade_on": "Alpaca", "bucket": "core"},
+    "SPDW":         {"category": "Developed ex-US",      "trade_on": "Alpaca", "bucket": "core"},
+    "SPEM":         {"category": "Emerging Markets",     "trade_on": "Alpaca", "bucket": "core"},
+    "FLIN":         {"category": "India (US-listed)",    "trade_on": "Alpaca", "bucket": "core"},
     # Core — India NSE
-    "NIFTYBEES.NS": {"category": "Nifty 50",             "trade_on": "Dhan",           "bucket": "core"},
-    # Satellite — technology & sectors
-    "XLK":  {"category": "Technology Sector",    "trade_on": "Alpaca", "bucket": "satellite"},
-    "QQQM": {"category": "NASDAQ-100",           "trade_on": "Alpaca", "bucket": "satellite"},
+    "NIFTYBEES.NS": {"category": "Nifty 50",             "trade_on": "Dhan",   "bucket": "core"},
+    # Satellite — thematic growth
     "SOXQ": {"category": "Semiconductors",       "trade_on": "Alpaca", "bucket": "satellite"},
-    "ICLN": {"category": "Clean Energy",         "trade_on": "Alpaca", "bucket": "satellite"},
-    "USCA": {"category": "US ESG Leaders",       "trade_on": "Alpaca", "bucket": "satellite"},
-    "ESGV": {"category": "US ESG Broad",         "trade_on": "Alpaca", "bucket": "satellite"},
-    "XLY":  {"category": "Consumer Discretionary","trade_on": "Alpaca", "bucket": "satellite"},
+    "XLK":  {"category": "Technology Sector",    "trade_on": "Alpaca", "bucket": "satellite"},
+    "AVUV": {"category": "US Small-Cap Value",   "trade_on": "Alpaca", "bucket": "satellite"},
+    "URNM": {"category": "Uranium / Nuclear",    "trade_on": "Alpaca", "bucket": "satellite"},
+    "CIBR": {"category": "Cybersecurity",        "trade_on": "Alpaca", "bucket": "satellite"},
+    "SMIN": {"category": "India Small-Cap",      "trade_on": "Alpaca", "bucket": "satellite"},
+    "XBI":  {"category": "Biotech",              "trade_on": "Alpaca", "bucket": "satellite"},
 }
 
 # ── News queries per region ───────────────────────────────────────────────────
 
 NEWS_QUERIES: Dict[str, List[str]] = {
     "INTL": [
-        "US ETF market outlook semiconductor AI",
-        "S&P 500 broad market ETF momentum",
-        "Fed interest rate global equities 2026",
-        "clean energy ESG ETF performance",
-        "technology sector NASDAQ ETF rally",
+        "hyperscaler AI semiconductor demand ETF 2026",
+        "US large-cap broad market ETF momentum Fed rate",
+        "uranium nuclear energy AI data center power demand",
+        "cybersecurity spending NASDAQ ETF 2026",
+        "US small-cap value ETF performance 2026",
     ],
     "BSE": [
-        "India Nifty 50 ETF outlook",
-        "RBI interest rate India 2026",
-        "India GDP growth Nifty rally",
-        "NSE ETF FII flows India market",
-        "India stock market performance",
+        "India Nifty 50 ETF FII flows outlook 2026",
+        "RBI monetary policy India small-cap 2026",
+        "India GDP growth manufacturing supply chain",
+        "NSE ETF Nifty rally emerging market",
+        "India biotech pharma sector 2026",
     ],
 }
 
@@ -137,7 +133,7 @@ def _market_label(ticker: str) -> str:
     if ticker.endswith(".NS"):
         return "NSE"
     meta = ETF_META.get(ticker, {})
-    return "NYSE" if meta.get("trade_on") == "Alpaca" and ticker in ("SPLG", "SPDW", "SPEM", "FLIN", "XLK", "XLY") else "NASDAQ"
+    return "NYSE" if meta.get("trade_on") == "Alpaca" and ticker in ("USCA", "SPDW", "SPEM", "FLIN", "AVUV", "URNM", "SMIN", "XLK", "XBI") else "NASDAQ"
 
 
 def fetch_etf_metrics(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -399,7 +395,7 @@ def run_ranker(
 
     print(f"\n{'='*60}")
     print(f"  NO-LLM ETF RANKER  —  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  Universe : {len(ALL_TICKERS)} ETFs  |  TER ceiling: {ter_threshold*100:.2f}%")
+    print(f"  Universe : {len(ALL_TICKERS)} ETFs (v3)  |  TER ceiling: {ter_threshold*100:.2f}%")
     print(f"{'='*60}")
 
     # 1. Metrics

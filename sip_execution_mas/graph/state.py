@@ -23,6 +23,10 @@ class ETFRecord(TypedDict):
     ytd_return: Optional[float]
     momentum_3m: Optional[float]
     momentum_1m: Optional[float]
+    trailing_volatility_3m: Optional[float]  # annualised daily vol, decimal (e.g. 0.15 = 15%)
+    forward_pe: Optional[float]              # forward P/E ratio (from yfinance)
+    beta: Optional[float]                    # 1-year beta vs S&P 500
+    dividend_yield: Optional[float]          # trailing annual dividend yield (decimal)
     current_price: Optional[float]
     currency: str         # "USD" | "INR" | "HKD"
     data_source: str      # "yfinance" | "gemini_estimate" | "fallback"
@@ -130,6 +134,9 @@ class SIPExecutionState(TypedDict):
     risk_violations: List[str]
     risk_audit_notes: str
     audit_retry_count: int
+    # Value-Averaging fields (set by Node 4 when panic+floor condition fires)
+    va_triggered: bool    # True when the 20% top-up was applied this month
+    va_multiplier: float  # Actual multiplier used (1.0 = no adjustment; 1.20 = top-up)
 
     # ── Node 5 outputs ────────────────────────────────────────────
     execution_results: List[ExecutionResult]

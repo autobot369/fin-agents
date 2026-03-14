@@ -1,6 +1,6 @@
 """
-Node 4 — Risk Auditor (Guardrail)
-===================================
+Node 4 — Risk Auditor (Guardrail + Crash-Accumulator Value-Averaging)
+======================================================================
 Hard rule-checker. Never approves a portfolio that violates:
 
   Rule 1  MAX_POSITION  — no single ETF > max_position_pct of total SIP
@@ -12,6 +12,21 @@ Hard rule-checker. Never approves a portfolio that violates:
 If violations exist:
   - retry_count < MAX_RETRIES  → reject (loops back to Node 3)
   - retry_count >= MAX_RETRIES → hard abort
+
+Crash-Accumulator Value-Averaging (applied only on clean approval):
+  Multi-tiered SIP scaling triggered when Node 2 signals macro panic.
+  Panic condition : any known risk-off trigger in boom_triggers,
+                    OR portfolio-average sentiment < PANIC_SENTIMENT_THRESHOLD.
+
+  Tier 1 — Standard Dip   : panic present AND -15.0% < avg_momentum_3m <= 0.0%
+                              → va_multiplier = 1.20  (+20% SIP)
+  Tier 2 — Generational Crash: panic present AND avg_momentum_3m <= -15.0%
+                              → va_multiplier = 1.50  (+50% SIP)
+
+  When triggered, all proposed_order monthly_usd values are scaled by the
+  applicable multiplier and weights are recomputed.  The effective SIP is
+  written back to state as sip_amount so Node 5 executes at the correct size.
+  va_triggered / va_multiplier are set in state for auditing and Streamlit.
 
 Gemini explains violations and suggests corrective actions in natural language.
 Falls back to template explanation if Gemini unavailable.
@@ -33,6 +48,29 @@ if str(_SIP_ROOT) not in sys.path:
     sys.path.insert(0, str(_SIP_ROOT))
 
 MAX_RETRIES = 2
+
+# ── Value-Averaging constants ─────────────────────────────────────────────────
+
+# Tier 1: standard dip — panic present AND momentum between -15% and 0%
+VA_MULTIPLIER_TIER1 = 1.20    # +20% SIP
+
+# Tier 2: generational crash — panic present AND momentum <= -15%
+VA_MULTIPLIER_TIER2 = 1.50    # +50% SIP
+
+# Momentum threshold separating Tier 1 from Tier 2
+MOMENTUM_CRASH_THRESHOLD = -15.0   # percent
+
+# Sentiment threshold below which the portfolio is considered to be in panic
+PANIC_SENTIMENT_THRESHOLD = 0.35
+
+# Boom triggers produced by Node 2 that count as a panic signal
+_PANIC_TRIGGER_TOKENS = {
+    "GLOBAL_RISK_OFF", "MARKET_CRASH", "SYSTEMIC_RISK", "RECESSION_FEAR",
+    "CREDIT_CRUNCH", "BANKING_CRISIS", "LIQUIDITY_CRISIS", "BEAR_MARKET",
+    "GEOPOLITICAL_RISK", "RATE_SHOCK", "CHINA_TECH_CRACKDOWN",
+    "EMERGING_MARKETS_CRASH", "FLASH_CRASH", "VOLATILITY_SPIKE",
+}
+
 
 # ── Hard rule checks ──────────────────────────────────────────────────────────
 
@@ -69,7 +107,7 @@ def _check_rules(
 
     region_cap = sip_amount * max_region_pct
     for region, total in region_totals.items():
-        if total > region_cap:
+        if total > region_cap + 0.01:   # 1-cent tolerance for rounding
             pct = total / sip_amount * 100
             violations.append(
                 f"RULE_2_VIOLATION: Region {region} allocated ${total:.2f} "
@@ -192,6 +230,100 @@ def _gemini_audit_notes(
         return "\n".join(lines)
 
 
+# ── Value-Averaging helpers ───────────────────────────────────────────────────
+
+def _detect_va_condition(
+    tickers: List[str],
+    sentiment_scores: Dict[str, float],
+    all_etf_data: Dict[str, Any],
+    boom_triggers: List[str],
+) -> tuple:
+    """
+    Return (multiplier: float, reason: str).
+
+    multiplier = 1.0  → no Value-Averaging
+    multiplier = 1.20 → Tier 1 Standard Dip
+    multiplier = 1.50 → Tier 2 Generational Crash
+
+    Panic condition : any _PANIC_TRIGGER_TOKENS token in boom_triggers,
+                      OR portfolio-average sentiment < PANIC_SENTIMENT_THRESHOLD.
+
+    Tier 1 : panic present AND MOMENTUM_CRASH_THRESHOLD < avg_momentum_3m <= 0.0%
+    Tier 2 : panic present AND avg_momentum_3m <= MOMENTUM_CRASH_THRESHOLD
+
+    tickers: list of ticker strings (e.g. filtered_tickers or [o["ticker"] for o in orders])
+    """
+    if not tickers:
+        return 1.0, ""
+
+    # ── Panic check ───────────────────────────────────────────────────────────
+    trigger_tokens   = {t.upper() for t in boom_triggers}
+    panic_from_token = bool(trigger_tokens & _PANIC_TRIGGER_TOKENS)
+
+    sentiments = [sentiment_scores.get(t, 0.50) for t in tickers]
+    avg_sentiment = sum(sentiments) / len(sentiments)
+    panic_from_sentiment = avg_sentiment < PANIC_SENTIMENT_THRESHOLD
+
+    is_panic = panic_from_token or panic_from_sentiment
+
+    if not is_panic:
+        return 1.0, ""
+
+    # ── Momentum tier check ───────────────────────────────────────────────────
+    mom_values = [
+        all_etf_data.get(t, {}).get("momentum_3m")
+        for t in tickers
+    ]
+    valid_moms = [m for m in mom_values if m is not None]
+    if not valid_moms:
+        return 1.0, ""
+
+    avg_momentum = sum(valid_moms) / len(valid_moms)
+
+    panic_detail = (
+        f"trigger(s)={sorted(trigger_tokens & _PANIC_TRIGGER_TOKENS)}"
+        if panic_from_token
+        else f"avg_sentiment={avg_sentiment:.3f} < {PANIC_SENTIMENT_THRESHOLD}"
+    )
+
+    if avg_momentum <= MOMENTUM_CRASH_THRESHOLD:
+        # Tier 2 — Generational Crash: avg momentum below -15%
+        reason = (
+            f"VA TIER 2 (Generational Crash) — panic: {panic_detail}; "
+            f"avg_mom3m={avg_momentum:.1f}% ≤ {MOMENTUM_CRASH_THRESHOLD}%"
+        )
+        return VA_MULTIPLIER_TIER2, reason
+    elif avg_momentum <= 0.0:
+        # Tier 1 — Standard Dip: avg momentum between -15% and 0%
+        reason = (
+            f"VA TIER 1 (Standard Dip) — panic: {panic_detail}; "
+            f"avg_mom3m={avg_momentum:.1f}% in ({MOMENTUM_CRASH_THRESHOLD}%, 0%]"
+        )
+        return VA_MULTIPLIER_TIER1, reason
+    else:
+        # Positive momentum with panic signal — no VA (market not yet discounted)
+        return 1.0, ""
+
+
+def _apply_va_multiplier(
+    proposed_orders: List[ProposedOrder],
+    base_sip: float,
+    multiplier: float,
+) -> tuple:
+    """
+    Scale every order's monthly_usd by multiplier, recompute weights.
+    Returns (scaled_orders, effective_sip).
+    """
+    effective_sip = round(base_sip * multiplier, 2)
+    scaled: List[ProposedOrder] = []
+    for order in proposed_orders:
+        o = dict(order)
+        o["monthly_usd"] = round(o["monthly_usd"] * multiplier, 2)
+        o["weight"]      = round(o["monthly_usd"] / effective_sip, 5)
+        scaled.append(o)  # type: ignore[arg-type]
+    return scaled, effective_sip
+
+
 # ── Node function ─────────────────────────────────────────────────────────────
 
 def risk_auditor_node(state: SIPExecutionState) -> dict:
@@ -199,9 +331,13 @@ def risk_auditor_node(state: SIPExecutionState) -> dict:
     Node 4 — Risk Auditor
 
     Checks proposed_orders against hard limits.
-    - approved=True  → workflow routes to Node 5 (Broker)
-    - approved=False, retry_count < MAX_RETRIES → routes back to Node 3
-    - approved=False, retry_count >= MAX_RETRIES → routes to Node 6 (abort)
+    - approved=True  → (optionally applies Value-Averaging) → Node 5
+    - approved=False, retry_count < MAX_RETRIES → back to Node 3
+    - approved=False, retry_count >= MAX_RETRIES → Node 6 (abort)
+
+    Value-Averaging: on clean approval, checks for panic + momentum-tier condition.
+    If detected, scales all order amounts by the tier multiplier (1.20 or 1.50) and
+    updates sip_amount in state so Node 5 executes at the correct size.
     """
     proposed_orders  = state["proposed_orders"]
     sip_amount       = state["sip_amount"]
@@ -214,6 +350,11 @@ def risk_auditor_node(state: SIPExecutionState) -> dict:
     force            = state.get("force", False)
     # Rule 4 (no duplicate month) is bypassed in paper mode or when --force is set
     skip_rule4       = dry_run or force
+
+    # Node 2 outputs needed for Value-Averaging detection
+    sentiment_scores = state.get("sentiment_scores", {})
+    all_etf_data     = state.get("all_etf_data", {})
+    boom_triggers    = state.get("boom_triggers", [])
 
     print(f"\n[Node 4] Risk Auditor — auditing {len(proposed_orders)} orders …")
     if force and not dry_run:
@@ -229,7 +370,7 @@ def risk_auditor_node(state: SIPExecutionState) -> dict:
     # Generate audit notes via Gemini
     audit_notes = _gemini_audit_notes(violations, proposed_orders, sip_amount)
 
-    approved = len(violations) == 0
+    approved  = len(violations) == 0
     new_retry = retry_count + (0 if approved else 1)
 
     if approved:
@@ -243,9 +384,42 @@ def risk_auditor_node(state: SIPExecutionState) -> dict:
         else:
             print(f"  [Node 4] Sending back to Optimizer (attempt {new_retry}/{MAX_RETRIES})")
 
+    # ── Value-Averaging (only on clean approval) ──────────────────────────────
+    va_triggered  = False
+    va_mult       = 1.0
+    effective_sip = sip_amount
+
+    if approved:
+        va_mult, va_reason = _detect_va_condition(
+            [o["ticker"] for o in proposed_orders],
+            sentiment_scores, all_etf_data, boom_triggers,
+        )
+        if va_mult > 1.0:
+            proposed_orders, effective_sip = _apply_va_multiplier(
+                proposed_orders, sip_amount, va_mult,
+            )
+            va_triggered = True
+            tier_label = "TIER 2 — Generational Crash" if va_mult >= VA_MULTIPLIER_TIER2 else "TIER 1 — Standard Dip"
+            print(
+                f"  [Node 4] ⚡ VALUE-AVERAGING {tier_label} — "
+                f"SIP ${sip_amount:.2f} → ${effective_sip:.2f} "
+                f"(×{va_mult:.2f})  |  {va_reason}"
+            )
+        else:
+            va_mult = 1.0   # normalise in case _detect returned 1.0
+            print(f"  [Node 4] Value-Averaging: not triggered "
+                  f"(panic={bool(set(t.upper() for t in boom_triggers) & _PANIC_TRIGGER_TOKENS)}, "
+                  f"momentum=positive or no data)")
+
     return {
-        "risk_approved":    approved,
-        "risk_violations":  violations,
-        "risk_audit_notes": audit_notes,
+        "risk_approved":     approved,
+        "risk_violations":   violations,
+        "risk_audit_notes":  audit_notes,
         "audit_retry_count": new_retry,
+        # VA fields — always written so state is consistent
+        "va_triggered":      va_triggered,
+        "va_multiplier":     va_mult,
+        # Overwrite proposed_orders + sip_amount when VA fired
+        "proposed_orders":   proposed_orders,
+        "sip_amount":        effective_sip,
     }

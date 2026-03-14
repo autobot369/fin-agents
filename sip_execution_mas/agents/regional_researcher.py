@@ -1,38 +1,32 @@
 """
 Node 1 — Regional Alpha & Cost Orchestrator
 =============================================
-Identifies a monthly "Investment Universe" of 10–15 ETFs across three tiers
-using Gemini for discovery and yfinance for validation.
+Uses a locked 14-ETF universe split into two permanent buckets.
+Universe discovery has been removed — the 14 tickers never change.
 
-Phase 1 — Universe Discovery (Three-Tier Scan)
-  • India Tier   (BSE/NSE)      : Nifty 50, Next 50, PSU Bank ETFs. TER < 0.20%.
-                                   2026 context: Reliance Industries + Infrastructure themes.
-  • US Tier      (NASDAQ/NYSE)  : Core (VOO/QQQ) at TER < 0.15% + Thematic (SOXX/AI).
-  • HK Proxy Tier (HKEX → US)  : Checks for US-listed equivalents before recommending
-                                   a local HKEX ticker. If TER diff < 0.10%, use US proxy
-                                   to save the 0.10% HK Stamp Duty.
+Node 1 responsibilities:
+  1. Build ETFRecord for all 14 locked tickers via yfinance.
+  2. Fetch recent macro news (DuckDuckGo + yfinance.news) for Node 2
+     (signal_scorer). News drives satellite weight rotation — it is the
+     only variable input per month.
+  3. Always passes all 14 tickers as filtered_tickers (no TER/liquidity cull).
 
-Phase 2 — Data Extraction & Cost Attribution
-  Each ticker gets: expense_ratio (yfinance / Gemini estimate),
-  adv_usd (liquidity), est_entry_cost_pct, recommended_broker, is_proxy.
+Locked buckets:
+  Core (70% of SIP, 7 ETFs):
+    VTI · SPLG · SPDW · SPEM · FLIN · NIFTYBEES.NS · QUAL
+  Satellite (30% of SIP, 7 ETFs):
+    XLK · QQQM · SOXQ · ICLN · USCA · ESGV · XLY
 
-  Entry cost formula:
-    cost = (brokerage_min / trade_size) + stamp_duty + (expense_ratio / 12)
-
-Phase 3 — Guardrails
-  • Liquidity: ADV < $1M USD → excluded with warning.
-  • No Redundancy: US market provides sufficient HK/China exposure in most cases.
-  • FX flag: HKD and INR trades noted in category field.
-
-Falls back per-tier to hardcoded seed lists if Gemini is unavailable.
+Backtest mode (as_of_date set):
+  yfinance data and news are bounded to as_of_date for historical accuracy.
+  Universe and buckets are identical to production — no discovery calls.
 """
 from __future__ import annotations
 
-import json
-import os
+import math
 import time
 from datetime import date as _Date, datetime as _Datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import yfinance as yf
 
@@ -44,247 +38,89 @@ from sip_execution_mas.graph.state import ETFRecord, SIPExecutionState
 _BROKERAGE_MIN: Dict[str, float] = {
     "Dhan":   0.00,   # Zero brokerage for BSE/NSE ETFs
     "Alpaca": 0.00,   # Commission-free US ETFs
-    "Tiger":  0.50,   # Tiger Brokers HK: ~HKD 3 ≈ $0.50 USD
-    "IBKR":   2.00,   # IBKR minimum for HK trades
 }
-
-_HK_STAMP_DUTY = 0.001    # 0.10% on every HK buy
-_TRADE_SIZE    = 500.0    # Reference trade size in USD
-_ADV_MIN_USD   = 1_000_000  # $1M USD minimum average daily volume
-
-# FX conversion factors (approximate)
-_HKD_USD = 0.128          # 1 HKD ≈ $0.128 USD
+_TRADE_SIZE  = 500.0        # Reference trade size in USD
 
 
-# ── Gemini client ─────────────────────────────────────────────────────────────
+# ── Locked universe (14 ETFs, v2) ────────────────────────────────────────────
 
-def _get_gemini_model(temperature: float = 0.2):
-    import google.generativeai as genai
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise EnvironmentError("GEMINI_API_KEY not set")
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=temperature,
-        ),
-    )
+_CORE_UNIVERSE: List[Dict[str, Any]] = [
+    {"ticker": "VTI",          "name": "Vanguard Total Stock Market ETF",          "ter_pct": 0.03, "category": "broad_market",    "market": "NASDAQ", "region": "US"},
+    {"ticker": "SPLG",         "name": "SPDR Portfolio S&P 500 ETF",               "ter_pct": 0.02, "category": "broad_market",    "market": "NYSE",   "region": "US"},
+    {"ticker": "SPDW",         "name": "SPDR Portfolio Developed World ex-US ETF", "ter_pct": 0.04, "category": "broad_market",    "market": "NYSE",   "region": "US"},
+    {"ticker": "SPEM",         "name": "SPDR Portfolio Emerging Markets ETF",      "ter_pct": 0.07, "category": "emerging_markets","market": "NYSE",   "region": "US"},
+    {"ticker": "FLIN",         "name": "Franklin FTSE India ETF",                  "ter_pct": 0.19, "category": "india",           "market": "NYSE",   "region": "US"},
+    {"ticker": "NIFTYBEES.NS", "name": "Nippon India ETF Nifty 50 BeES",           "ter_pct": 0.04, "category": "india",           "market": "NSE",    "region": "BSE"},
+    {"ticker": "QUAL",         "name": "iShares MSCI USA Quality Factor ETF",      "ter_pct": 0.15, "category": "quality_factor",  "market": "NASDAQ", "region": "US"},
+]
 
+_SATELLITE_UNIVERSE: List[Dict[str, Any]] = [
+    {"ticker": "XLK",  "name": "Technology Select Sector SPDR Fund",      "ter_pct": 0.10, "category": "technology",    "market": "NYSE",   "region": "US"},
+    {"ticker": "QQQM", "name": "Invesco NASDAQ 100 ETF",                  "ter_pct": 0.15, "category": "technology",    "market": "NASDAQ", "region": "US"},
+    {"ticker": "SOXQ", "name": "Invesco PHLX Semiconductor ETF",          "ter_pct": 0.19, "category": "semiconductors","market": "NASDAQ", "region": "US"},
+    {"ticker": "ICLN", "name": "iShares Global Clean Energy ETF",         "ter_pct": 0.42, "category": "clean_energy",  "market": "NASDAQ", "region": "US"},
+    {"ticker": "USCA", "name": "Xtrackers MSCI USA ESG Leaders ETF",      "ter_pct": 0.10, "category": "esg",           "market": "NASDAQ", "region": "US"},
+    {"ticker": "ESGV", "name": "Vanguard ESG US Stock ETF",               "ter_pct": 0.09, "category": "esg",           "market": "NASDAQ", "region": "US"},
+    {"ticker": "XLY",  "name": "Consumer Discr Select Sector SPDR Fund",  "ter_pct": 0.10, "category": "consumer",      "market": "NYSE",   "region": "US"},
+]
 
-def _parse_json(text: str) -> Any:
-    text = text.strip()
-    if text.startswith("```"):
-        parts = text.split("```")
-        text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
-    return json.loads(text)
-
-
-# ── Dated prompt helper ───────────────────────────────────────────────────────
-
-def _build_dated_prompt(base_prompt: str, as_of_date: _Date) -> str:
-    """
-    Prepend a simulation-date header to any Gemini discovery prompt.
-    Instructs Gemini to recommend only ETFs that existed and were appropriate
-    as of as_of_date, without leaking knowledge of later events.
-    Production callers pass as_of_date=None and this function is never called.
-    """
-    month_year = as_of_date.strftime("%B %Y")
-    iso        = as_of_date.isoformat()
-    header = (
-        "SIMULATION MODE — you are making recommendations as of {my} ({iso}).\n"
-        "Rules:\n"
-        "  • Recommend only ETFs that existed and were listed as of {iso}.\n"
-        "  • Base TER, AUM, and liquidity figures on what was known in {my}.\n"
-        "  • Apply macro themes and interest-rate context as of {my}, not today.\n"
-        "  • Do NOT include ETFs launched, listed, or restructured after {iso}.\n"
-        "  • Do NOT reference events, data, or fund changes from after {iso}.\n\n"
-    ).format(my=month_year, iso=iso)
-    return header + base_prompt
+_LOCKED_UNIVERSE            = _CORE_UNIVERSE + _SATELLITE_UNIVERSE
+_CORE_UNIVERSE_TICKERS      = frozenset(r["ticker"] for r in _CORE_UNIVERSE)
+_SATELLITE_UNIVERSE_TICKERS = frozenset(r["ticker"] for r in _SATELLITE_UNIVERSE)
 
 
-# ── Phase 1 Gemini Prompts ────────────────────────────────────────────────────
+# ── Thematic news categories ───────────────────────────────────────────────────
+# Each category maps to 2 targeted DDGS search queries.  More specific queries
+# give Gemini higher-quality signal than a single broad market search.
 
-_INDIA_PROMPT = """
-You are a Regional Alpha & Cost Orchestrator for a monthly SIP investment system.
-
-Identify exactly 10 NSE-listed ETFs for the India tier.
-
-Selection criteria:
-1. Expense Ratio MUST be < 0.20% (0.0020 decimal). Reject any ETF above this.
-2. High AUM (prefer > ₹500 crore) and liquid daily traded volume.
-3. NSE-listed only — ticker symbols MUST end in .NS (e.g. NIFTYBEES.NS).
-
-Coverage mix required:
-- 3–4 Nifty 50 index ETFs (lowest TER options, e.g. NIFTYBEES.NS, SETFNIF50.NS, HDFCNIFTY.NS)
-- 2–3 Nifty Next 50 / Midcap ETFs (e.g. JUNIORBEES.NS, MIDCAPETF.NS)
-- 2–3 Sectoral / Thematic: PSU Bank, Infrastructure, or high-conviction themes
-
-2026 context — prioritise:
-- ETFs with high Reliance Industries weighting (US refinery deal + energy transition tailwind)
-- Infrastructure-focused ETFs (India capex supercycle, PLI schemes)
-- PSU Bank ETFs if current RBI rate environment is supportive
-
-Return a JSON array of exactly 10 objects:
-{
-  "ticker": "NIFTYBEES.NS",
-  "name": "Nippon India ETF Nifty 50 BeES",
-  "ter_pct": 0.04,
-  "aum_b_est": 30.5,
-  "adv_usd_est": 5.2,
-  "category": "Nifty 50 | core",
-  "theme": "India Large-Cap",
-  "rationale": "Lowest-cost Nifty 50 tracker with high Reliance weighting"
-}
-""".strip()
-
-_US_PROMPT = """
-You are a Regional Alpha & Cost Orchestrator for a monthly SIP investment system.
-
-Identify exactly 12 US-listed ETFs (NASDAQ or NYSE) for the US tier.
-
-Coverage mix required:
-- 4–5 Core broad-market ETFs: expense ratio MUST be < 0.15%. Include options like VOO, QQQ, VTI, SCHB, IVV.
-- 4–5 Thematic high-conviction ETFs: AI/ML, Semiconductors, Clean Energy, Biotech.
-  No strict TER limit for thematic but flag if TER > 0.60%.
-  Examples: SOXX, SMH, BOTZ, IRBO, SOXQ, CLOU.
-- 2–3 International developed-market ETFs at TER < 0.15%: VEA, SPDW, SCHF.
-
-2026 context — prioritise:
-- AI infrastructure buildout (data centres, hyperscalers): SOXX, BOTZ, IRBO
-- Semiconductor cycle recovery: SMH, SOXQ
-- US rate cut environment: growth tilt justified
-
-Selection criteria:
-- Core: TER < 0.15% strictly enforced
-- Thematic: ADV > $10M USD strongly preferred
-- All: ADV > $1M USD minimum
-
-Return a JSON array of exactly 12 objects:
-{
-  "ticker": "VOO",
-  "name": "Vanguard S&P 500 ETF",
-  "ter_pct": 0.03,
-  "aum_b_est": 470.0,
-  "adv_usd_est": 450.0,
-  "category": "core",
-  "theme": "US Large-Cap",
-  "rationale": "Lowest-cost S&P 500 tracker, bedrock holding"
-}
-""".strip()
-
-_HK_PROXY_PROMPT = """
-You are a Regional Alpha & Cost Orchestrator specialising in China/HK exposure optimisation.
-
-Identify 8 China/HK investment themes. For each theme provide BOTH the HKEX-listed ETF
-AND the best US-listed proxy available on NASDAQ/NYSE.
-
-Decision rule (implement this logic):
-- If |hk_ter_pct - us_proxy_ter_pct| < 0.10 → recommend "us_proxy"
-  (saves the 0.10% HK Stamp Duty per trade + lower IBKR minimums)
-- Only recommend "hk_local" if there is SPECIFIC regional alpha NOT available via US proxy
-  (e.g. HK Biotech, HK REIT, A-share sectors with no US equivalent)
-
-Theme examples: Broad China, China Internet, China Tech, China A-Shares (CSI 300),
-China Consumer, China Healthcare, HK Blue-Chip, China EV/Green Energy.
-
-Return a JSON array of exactly 8 objects:
-{
-  "theme": "Broad China",
-  "hk_ticker": "2800.HK",
-  "hk_name": "Tracker Fund of Hong Kong",
-  "hk_ter_pct": 0.09,
-  "hk_adv_usd_est": 50.0,
-  "us_proxy_ticker": "MCHI",
-  "us_proxy_name": "iShares MSCI China ETF",
-  "us_proxy_ter_pct": 0.19,
-  "us_proxy_adv_usd_est": 80.0,
-  "recommended": "hk_local",
-  "has_regional_alpha": true,
-  "recommendation_reason": "HK local has 0.09% TER vs 0.19% proxy — saving justifies stamp duty"
-}
-""".strip()
-
-
-# ── Fallback seed universe ────────────────────────────────────────────────────
-
-_FALLBACK: Dict[str, List[Dict[str, Any]]] = {
-    "BSE": [
-        {"ticker": "NIFTYBEES.NS",  "name": "Nippon Nifty 50 BeES",      "ter_pct": 0.04, "category": "core",      "theme": "Nifty 50"},
-        {"ticker": "SETFNIF50.NS",  "name": "SBI Nifty 50 ETF",          "ter_pct": 0.04, "category": "core",      "theme": "Nifty 50"},
-        {"ticker": "HDFCNIFTY.NS",  "name": "HDFC Nifty 50 ETF",         "ter_pct": 0.05, "category": "core",      "theme": "Nifty 50"},
-        {"ticker": "JUNIORBEES.NS", "name": "Nippon Nifty Next 50 BeES", "ter_pct": 0.06, "category": "midcap",    "theme": "Nifty Next 50"},
-        {"ticker": "BANKBEES.NS",   "name": "Nippon Bank BeES",           "ter_pct": 0.18, "category": "sectoral",  "theme": "PSU Bank"},
-        {"ticker": "CPSEETF.NS",    "name": "Nippon CPSE ETF",            "ter_pct": 0.10, "category": "sectoral",  "theme": "PSU/Infra"},
-        {"ticker": "ITBEES.NS",     "name": "Nippon IT BeES",             "ter_pct": 0.10, "category": "sectoral",  "theme": "India IT"},
-        {"ticker": "GOLDBEES.NS",   "name": "Nippon Gold BeES",           "ter_pct": 0.05, "category": "commodity", "theme": "Gold"},
-        {"ticker": "LIQUIDBEES.NS", "name": "Nippon Liquid BeES",         "ter_pct": 0.01, "category": "money_mkt", "theme": "Liquid"},
-        {"ticker": "MAFANG.NS",     "name": "Mirae FANG+ ETF",            "ter_pct": 0.83, "category": "thematic",  "theme": "Global Tech"},
+_CATEGORY_QUERIES: Dict[str, List[str]] = {
+    "TECH_SEMIS": [
+        "hyperscaler data center capex AI infrastructure deployment 2026",
+        "TSMC semiconductor supply chain AI chip demand NASDAQ",
     ],
-    "US": [
-        {"ticker": "VOO",   "name": "Vanguard S&P 500 ETF",           "ter_pct": 0.03, "category": "core",      "theme": "US Large-Cap"},
-        {"ticker": "QQQ",   "name": "Invesco QQQ Trust",               "ter_pct": 0.20, "category": "core",      "theme": "US Tech"},
-        {"ticker": "VTI",   "name": "Vanguard Total Stock Market",     "ter_pct": 0.03, "category": "core",      "theme": "US Total Market"},
-        {"ticker": "SCHB",  "name": "Schwab US Broad Market ETF",      "ter_pct": 0.03, "category": "core",      "theme": "US Broad"},
-        {"ticker": "VEA",   "name": "Vanguard FTSE Dev Markets",       "ter_pct": 0.05, "category": "core",      "theme": "Developed Markets"},
-        {"ticker": "SPDW",  "name": "SPDR Portfolio Dev World ex-US",  "ter_pct": 0.04, "category": "core",      "theme": "Developed Markets"},
-        {"ticker": "SOXX",  "name": "iShares Semiconductor ETF",       "ter_pct": 0.35, "category": "thematic",  "theme": "Semiconductors"},
-        {"ticker": "SMH",   "name": "VanEck Semiconductor ETF",        "ter_pct": 0.35, "category": "thematic",  "theme": "Semiconductors"},
-        {"ticker": "BOTZ",  "name": "Global X Robotics & AI ETF",      "ter_pct": 0.68, "category": "thematic",  "theme": "AI/Robotics"},
-        {"ticker": "IRBO",  "name": "iShares Robotics & AI ETF",       "ter_pct": 0.47, "category": "thematic",  "theme": "AI/Robotics"},
-        {"ticker": "SCHF",  "name": "Schwab International Equity ETF", "ter_pct": 0.06, "category": "core",      "theme": "International"},
-        {"ticker": "IEFA",  "name": "iShares Core MSCI EAFE ETF",      "ter_pct": 0.07, "category": "core",      "theme": "Developed Markets"},
+    "GREEN_ESG": [
+        "global carbon pricing clean energy subsidies ESG policy 2026",
+        "renewable energy investment ESG regulatory shifts climate finance",
     ],
-    "HKCN": [
-        {"ticker": "MCHI",  "name": "iShares MSCI China",           "ter_pct": 0.19, "category": "broad_china", "theme": "Broad China",    "is_proxy": True,  "proxy_for": "2800.HK"},
-        {"ticker": "FLCH",  "name": "Franklin FTSE China ETF",      "ter_pct": 0.08, "category": "broad_china", "theme": "Broad China",    "is_proxy": True,  "proxy_for": "3115.HK"},
-        {"ticker": "KWEB",  "name": "KraneShares China Internet",   "ter_pct": 0.76, "category": "thematic",    "theme": "China Internet", "is_proxy": True,  "proxy_for": "3174.HK"},
-        {"ticker": "CQQQ",  "name": "Invesco China Technology ETF", "ter_pct": 0.65, "category": "thematic",    "theme": "China Tech",     "is_proxy": True,  "proxy_for": "3086.HK"},
-        {"ticker": "ASHR",  "name": "Xtrackers CSI 300",            "ter_pct": 0.65, "category": "a_shares",    "theme": "CSI 300",        "is_proxy": True,  "proxy_for": "3188.HK"},
-        {"ticker": "CNYA",  "name": "iShares MSCI China A ETF",     "ter_pct": 0.55, "category": "a_shares",    "theme": "China A-Shares", "is_proxy": True,  "proxy_for": "3188.HK"},
-        {"ticker": "KURE",  "name": "KraneShares China Healthcare", "ter_pct": 0.75, "category": "thematic",    "theme": "China Health",   "is_proxy": True,  "proxy_for": "2820.HK"},
-        {"ticker": "CHIQ",  "name": "Global X China Consumer Disc", "ter_pct": 0.65, "category": "thematic",    "theme": "China Consumer", "is_proxy": True,  "proxy_for": "3032.HK"},
+    "INDIA_EM": [
+        "FII foreign institutional investor flows India NSE RBI monetary policy 2026",
+        "emerging market supply chain relocation India trade manufacturing",
+    ],
+    "QUALITY_CORE": [
+        "S&P 500 share buyback corporate balance sheet health 2026",
+        "US equity broad market quality factor Federal Reserve outlook",
     ],
 }
 
-# HKEX → US proxy mapping (for cost-comparison logic)
-_HKEX_TO_US_PROXY: Dict[str, str] = {
-    "2800.HK": "MCHI",   # Tracker Fund → iShares MSCI China
-    "3033.HK": "KWEB",   # CSOP MSCI China Internet → KraneShares
-    "3086.HK": "CQQQ",   # CSOP MSCI China Tech → Invesco China Tech
-    "3115.HK": "FLCH",   # CSOP FTSE China A50 → Franklin FTSE China
-    "3188.HK": "ASHR",   # ChinaAMC CSI 300 → Xtrackers CSI 300
-    "2820.HK": "KURE",   # CSOP China Healthcare → KraneShares China HC
-    "3032.HK": "CHIQ",   # CSOP China Consumer → Global X China Consumer
-    "3174.HK": "KWEB",   # Hang Seng Internet → KraneShares Internet
-    "9834.HK": "SMH",    # CSOP NASDAQ-100 → VanEck Semiconductors
+# Ticker → thematic category (drives targeted DDGS queries and VADER grouping)
+_TICKER_CATEGORY: Dict[str, str] = {
+    "XLK":          "TECH_SEMIS",
+    "QQQM":         "TECH_SEMIS",
+    "SOXQ":         "TECH_SEMIS",
+    "ICLN":         "GREEN_ESG",
+    "USCA":         "GREEN_ESG",
+    "ESGV":         "GREEN_ESG",
+    "FLIN":         "INDIA_EM",
+    "NIFTYBEES.NS": "INDIA_EM",
+    "SPEM":         "INDIA_EM",
+    "QUAL":         "QUALITY_CORE",
+    "VTI":          "QUALITY_CORE",
+    "SPLG":         "QUALITY_CORE",
+    "SPDW":         "QUALITY_CORE",
 }
 
 
-# ── Phase 2: Cost attribution ─────────────────────────────────────────────────
+# ── Cost attribution helpers ──────────────────────────────────────────────────
 
-def _recommend_broker(ticker: str, is_hkex_local: bool = False) -> str:
+def _recommend_broker(ticker: str) -> str:
     if ticker.endswith(".NS") or ticker.endswith(".BO"):
         return "Dhan"
-    if is_hkex_local or ticker.endswith(".HK"):
-        return "Tiger"
     return "Alpaca"
 
 
-def _calc_entry_cost(
-    expense_ratio: float,
-    broker: str,
-    trade_size: float = _TRADE_SIZE,
-    is_hk_local: bool = False,
-) -> float:
-    """
-    Total drag for a single trade, as a decimal fraction.
-    Formula: (brokerage_min / trade_size) + stamp_duty + (expense_ratio / 12)
-    """
-    brokerage_min = _BROKERAGE_MIN.get(broker, 0.0)
-    stamp_duty    = _HK_STAMP_DUTY if is_hk_local else 0.0
-    return (brokerage_min / trade_size) + stamp_duty + (expense_ratio / 12)
+def _calc_entry_cost(expense_ratio: float, broker: str, trade_size: float = _TRADE_SIZE) -> float:
+    """Monthly drag: (brokerage_min / trade_size) + (expense_ratio / 12)"""
+    return (_BROKERAGE_MIN.get(broker, 0.0) / trade_size) + (expense_ratio / 12)
 
 
 def _adv_usd(
@@ -293,154 +129,13 @@ def _adv_usd(
     price: Optional[float],
     usd_inr: float = 84.0,
 ) -> Optional[float]:
-    """Convert average daily volume (shares × price) to USD equivalent."""
+    """Average daily volume in USD equivalent."""
     if avg_volume is None or price is None or price <= 0:
         return None
     adv_native = avg_volume * price
     if ticker.endswith(".NS") or ticker.endswith(".BO"):
         return adv_native / usd_inr
-    if ticker.endswith(".HK"):
-        return adv_native * _HKD_USD
     return adv_native
-
-
-# ── Phase 1: Gemini discovery ─────────────────────────────────────────────────
-
-def _ask_gemini(prompt: str) -> List[Dict[str, Any]]:
-    model  = _get_gemini_model()
-    resp   = model.generate_content(prompt)
-    data   = _parse_json(resp.text)
-    if not isinstance(data, list) or len(data) == 0:
-        raise ValueError("Gemini returned empty or non-list")
-    return data
-
-
-def _build_india_tier(ter_threshold: float, as_of_date: Optional[_Date] = None) -> List[Dict[str, Any]]:
-    """Ask Gemini for India BSE ETFs. Falls back to seed list."""
-    try:
-        prompt = _build_dated_prompt(_INDIA_PROMPT, as_of_date) if as_of_date else _INDIA_PROMPT
-        recs = _ask_gemini(prompt)
-        cleaned = []
-        for r in recs:
-            ticker = str(r.get("ticker") or "").strip()
-            ter    = float(r.get("ter_pct") or 0.0)
-            if not ticker or ter >= 0.20:   # enforce India TER hard cap
-                continue
-            cleaned.append({
-                "ticker":      ticker,
-                "name":        str(r.get("name") or ticker),
-                "ter_pct":     ter,
-                "aum_b_est":   float(r.get("aum_b_est") or 0.0),
-                "adv_usd_est": float(r.get("adv_usd_est") or 0.0),
-                "category":    str(r.get("category") or "India ETF"),
-                "theme":       str(r.get("theme") or ""),
-                "rationale":   str(r.get("rationale") or ""),
-                "source":      "gemini",
-            })
-        print(f"  [Node 1] Gemini → India tier: {len(cleaned)} ETFs (TER < 0.20%)")
-        return cleaned or _FALLBACK["BSE"]
-    except Exception as exc:
-        print(f"  [Node 1] Gemini India tier failed ({exc}) — using seed list")
-        return _FALLBACK["BSE"]
-
-
-def _build_us_tier(as_of_date: Optional[_Date] = None) -> List[Dict[str, Any]]:
-    """Ask Gemini for US core + thematic ETFs. Falls back to seed list."""
-    try:
-        prompt = _build_dated_prompt(_US_PROMPT, as_of_date) if as_of_date else _US_PROMPT
-        recs = _ask_gemini(prompt)
-        cleaned = []
-        for r in recs:
-            ticker   = str(r.get("ticker") or "").upper().strip()
-            ter      = float(r.get("ter_pct") or 0.0)
-            category = str(r.get("category") or "thematic").lower()
-            if not ticker:
-                continue
-            # Enforce TER < 0.15% for core holdings only
-            if category == "core" and ter >= 0.15:
-                continue
-            cleaned.append({
-                "ticker":      ticker,
-                "name":        str(r.get("name") or ticker),
-                "ter_pct":     ter,
-                "aum_b_est":   float(r.get("aum_b_est") or 0.0),
-                "adv_usd_est": float(r.get("adv_usd_est") or 0.0),
-                "category":    category,
-                "theme":       str(r.get("theme") or ""),
-                "rationale":   str(r.get("rationale") or ""),
-                "source":      "gemini",
-            })
-        print(f"  [Node 1] Gemini → US tier: {len(cleaned)} ETFs")
-        return cleaned or _FALLBACK["US"]
-    except Exception as exc:
-        print(f"  [Node 1] Gemini US tier failed ({exc}) — using seed list")
-        return _FALLBACK["US"]
-
-
-def _build_hk_proxy_tier(as_of_date: Optional[_Date] = None) -> List[Dict[str, Any]]:
-    """
-    Ask Gemini for HK/China themes. Apply proxy decision logic:
-    if |hk_ter - us_proxy_ter| < 0.10 → use US proxy (saves stamp duty).
-    """
-    try:
-        prompt = _build_dated_prompt(_HK_PROXY_PROMPT, as_of_date) if as_of_date else _HK_PROXY_PROMPT
-        recs = _ask_gemini(prompt)
-        selected = []
-        for r in recs:
-            hk_ter = float(r.get("hk_ter_pct") or 0.75)
-            us_ter = float(r.get("us_proxy_ter_pct") or 0.75)
-            ter_diff = abs(hk_ter - us_ter)
-            # Gemini recommendation + enforce proxy rule
-            use_proxy = (
-                r.get("recommended") == "us_proxy"
-                or (ter_diff < 0.10 and not r.get("has_regional_alpha", False))
-            )
-
-            if use_proxy:
-                ticker = str(r.get("us_proxy_ticker") or "").upper().strip()
-                if not ticker:
-                    continue
-                selected.append({
-                    "ticker":      ticker,
-                    "name":        str(r.get("us_proxy_name") or ticker),
-                    "ter_pct":     us_ter,
-                    "aum_b_est":   float(r.get("us_proxy_adv_usd_est") or 0.0),
-                    "adv_usd_est": float(r.get("us_proxy_adv_usd_est") or 0.0),
-                    "category":    str(r.get("theme") or "China/HK"),
-                    "theme":       str(r.get("theme") or ""),
-                    "rationale":   (
-                        f"US proxy for {r.get('hk_ticker','?')} — "
-                        f"saves 0.10% HK stamp duty (TER diff {ter_diff:.2f}%)"
-                    ),
-                    "is_proxy":    True,
-                    "proxy_for":   str(r.get("hk_ticker") or ""),
-                    "source":      "gemini",
-                })
-            else:
-                # Use HKEX local — specific regional alpha justifies stamp duty
-                ticker = str(r.get("hk_ticker") or "").strip()
-                if not ticker:
-                    continue
-                selected.append({
-                    "ticker":      ticker,
-                    "name":        str(r.get("hk_name") or ticker),
-                    "ter_pct":     hk_ter,
-                    "aum_b_est":   float(r.get("hk_adv_usd_est") or 0.0),
-                    "adv_usd_est": float(r.get("hk_adv_usd_est") or 0.0),
-                    "category":    str(r.get("theme") or "China/HK"),
-                    "theme":       str(r.get("theme") or ""),
-                    "rationale":   str(r.get("recommendation_reason") or "Regional alpha"),
-                    "is_proxy":    False,
-                    "proxy_for":   None,
-                    "source":      "gemini",
-                })
-        print(f"  [Node 1] Gemini → HK/China tier: {len(selected)} ETFs "
-              f"({sum(1 for x in selected if x.get('is_proxy'))} US proxies, "
-              f"{sum(1 for x in selected if not x.get('is_proxy'))} HK local)")
-        return selected or _FALLBACK["HKCN"]
-    except Exception as exc:
-        print(f"  [Node 1] Gemini HK tier failed ({exc}) — using seed list")
-        return _FALLBACK["HKCN"]
 
 
 # ── yfinance enrichment ───────────────────────────────────────────────────────
@@ -464,6 +159,7 @@ def _fetch_yfinance_batch(
                 hist  = tk.history(start=start, end=end, auto_adjust=True)
             else:
                 hist = tk.history(period="1y", auto_adjust=True)
+
             info: Dict[str, Any] = {}
             try:
                 info = tk.info or {}
@@ -477,9 +173,12 @@ def _fetch_yfinance_batch(
             close = hist["Close"]
             price = float(close.iloc[-1])
 
-            mom3m = mom1m = ytd = None
+            mom3m = mom1m = ytd = vol_3m = None
             if len(close) >= 63:
                 mom3m = round((price / float(close.iloc[-63]) - 1) * 100, 2)
+                log_returns = close.pct_change().dropna().tail(63)
+                if len(log_returns) >= 20:
+                    vol_3m = round(float(log_returns.std()) * math.sqrt(252), 4)
             if len(close) >= 21:
                 mom1m = round((price / float(close.iloc[-21]) - 1) * 100, 2)
             if len(close) >= 5:
@@ -497,15 +196,27 @@ def _fetch_yfinance_batch(
 
             avg_vol = info.get("averageVolume") or info.get("averageDailyVolume10Day")
 
+            # Hard fundamental metrics for Gemini valuation anchoring
+            _fpe = info.get("forwardPE")
+            _beta = info.get("beta")
+            _div = info.get("dividendYield") or info.get("trailingAnnualDividendYield")
+            forward_pe    = round(float(_fpe),  2) if _fpe  and isinstance(_fpe,  (int, float)) else None
+            beta          = round(float(_beta), 3) if _beta and isinstance(_beta, (int, float)) else None
+            dividend_yield = round(float(_div),  4) if _div  and isinstance(_div,  (int, float)) else None
+
             results[ticker] = {
-                "price":   round(price, 4),
-                "ytd":     ytd,
-                "mom3m":   mom3m,
-                "mom1m":   mom1m,
-                "ter":     ter,
-                "aum_b":   aum_b,
-                "avg_vol": int(avg_vol) if avg_vol else None,
-                "source":  "yfinance",
+                "price":         round(price, 4),
+                "ytd":           ytd,
+                "mom3m":         mom3m,
+                "mom1m":         mom1m,
+                "vol_3m":        vol_3m,
+                "ter":           ter,
+                "aum_b":         aum_b,
+                "avg_vol":       int(avg_vol) if avg_vol else None,
+                "forward_pe":    forward_pe,
+                "beta":          beta,
+                "dividend_yield": dividend_yield,
+                "source":        "yfinance",
             }
         except Exception as exc:
             results[ticker] = {"error": str(exc)}
@@ -513,73 +224,30 @@ def _fetch_yfinance_batch(
     return results
 
 
-# ── News fetch ────────────────────────────────────────────────────────────────
+# ── Thematic news fetch ───────────────────────────────────────────────────────
 
 def _fetch_news(
-    market_tickers: Dict[str, List[str]],
-    max_per_query: int = 5,
     as_of_date: Optional[_Date] = None,
+    max_per_category: int = 6,
 ) -> Dict[str, List[str]]:
     """
-    Fetch headlines targeted at the specific recommended tickers per market.
+    Fetch thematic macro headlines per category group using targeted DDGS queries.
+    Returns {"TECH_SEMIS": [...], "GREEN_ESG": [...], "INDIA_EM": [...], "QUALITY_CORE": [...]}.
+
+    Category-specific queries give Gemini more precise signal than a single
+    broad market search — e.g. hyperscaler capex news for XLK/SOXQ vs.
+    carbon pricing news for ICLN/ESGV.
+
     as_of_date=None  → latest news (production).
-    as_of_date set   → news filtered to articles published on or before as_of_date (backtest).
+    as_of_date set   → headlines filtered to articles published on or before
+                       as_of_date (backtest — no future leakage).
     """
-    news: Dict[str, List[str]] = {}
+    news: Dict[str, List[str]] = {cat: [] for cat in _CATEGORY_QUERIES}
 
-    # Build context strings — include month/year when backtesting for better DDG relevance
+    cutoff_dt: Optional[_Datetime] = None
     if as_of_date:
-        month_year = as_of_date.strftime("%B %Y")
-        context = {
-            "BSE":  f"India NSE ETF Nifty market news {month_year}",
-            "US":   f"US ETF semiconductor AI market outlook {month_year}",
-            "HKCN": f"China Hong Kong ETF market news {month_year}",
-        }
         cutoff_dt = _Datetime.combine(as_of_date, _Datetime.max.time())
-        cutoff_ts = cutoff_dt.timestamp()
-    else:
-        context = {
-            "BSE":  "India NSE ETF Nifty Reliance Infrastructure RBI 2026",
-            "US":   "US ETF semiconductor AI market outlook NASDAQ 2026",
-            "HKCN": "China Hong Kong ETF market stimulus tech 2026",
-        }
-        cutoff_dt = cutoff_ts = None
 
-    # ── yfinance .news (date-stamped — backtest only, avoids unnecessary calls in production) ──
-    if as_of_date:
-        for market, tickers in market_tickers.items():
-            headlines: List[str] = []
-            for ticker in tickers[:4]:
-                try:
-                    for item in (yf.Ticker(ticker).news or []):
-                        # Handle old format (int timestamp) and new format (ISO string)
-                        pub_ts  = item.get("providerPublishTime", 0)
-                        pub_str = (item.get("content") or {}).get("pubDate", "")
-                        skip = False
-                        if pub_ts and isinstance(pub_ts, (int, float)):
-                            skip = float(pub_ts) > cutoff_ts
-                        elif pub_str:
-                            try:
-                                pub_dt = _Datetime.fromisoformat(
-                                    pub_str.replace("Z", "+00:00")
-                                ).replace(tzinfo=None)
-                                skip = pub_dt > cutoff_dt
-                            except Exception:
-                                pass
-                        if not skip:
-                            title = (
-                                (item.get("content") or {}).get("title")
-                                or item.get("title")
-                                or item.get("headline") or ""
-                            )
-                            if title and title not in headlines:
-                                headlines.append(title)
-                except Exception:
-                    pass
-                time.sleep(0.05)
-            news[market] = headlines[:max_per_query]
-
-    # ── DDGS news ─────────────────────────────────────────────────────────────
     try:
         try:
             from ddgs import DDGS
@@ -587,36 +255,37 @@ def _fetch_news(
             from duckduckgo_search import DDGS
 
         with DDGS() as ddgs:
-            for market, tickers in market_tickers.items():
-                existing = news.get(market, [])
-                if len(existing) >= max_per_query:
-                    continue
-                sample = " ".join(tickers[:5])
-                q = f"{sample} {context.get(market, 'ETF market outlook')}"
-                try:
-                    results = list(ddgs.news(q, max_results=max_per_query * 4 if as_of_date else max_per_query))
-                    for r in results:
-                        if as_of_date:
-                            date_str = r.get("date", "")
-                            if date_str:
-                                try:
-                                    pub_dt = _Datetime.fromisoformat(
-                                        date_str.replace("Z", "+00:00")
-                                    ).replace(tzinfo=None)
-                                    if pub_dt > cutoff_dt:
-                                        continue
-                                except Exception:
-                                    pass  # unparseable date — include conservatively
-                        title = r.get("title", "")
-                        if title and title not in existing:
-                            existing.append(title)
-                    news[market] = existing[:max_per_query]
-                except Exception:
-                    news.setdefault(market, [])
-                time.sleep(0.4 if as_of_date else 0.0)
+            for category, queries in _CATEGORY_QUERIES.items():
+                headlines: List[str] = []
+                for query in queries:
+                    # Append month/year for backtest date isolation
+                    if as_of_date:
+                        query = f"{query} {as_of_date.strftime('%B %Y')}"
+                    try:
+                        fetch_n = max_per_category * 3 if as_of_date else max_per_category
+                        results = list(ddgs.news(query, max_results=fetch_n))
+                        for r in results:
+                            if as_of_date and cutoff_dt:
+                                date_str = r.get("date", "")
+                                if date_str:
+                                    try:
+                                        pub_dt = _Datetime.fromisoformat(
+                                            date_str.replace("Z", "+00:00")
+                                        ).replace(tzinfo=None)
+                                        if pub_dt > cutoff_dt:
+                                            continue
+                                    except Exception:
+                                        pass
+                            title = r.get("title", "")
+                            if title and title not in headlines:
+                                headlines.append(title)
+                        time.sleep(0.3 if as_of_date else 0.1)
+                    except Exception:
+                        pass
+                news[category] = headlines[:max_per_category]
     except Exception:
-        for m in market_tickers:
-            news.setdefault(m, [])
+        pass   # all categories stay as empty lists
+
     return news
 
 
@@ -626,122 +295,92 @@ def regional_researcher_node(state: SIPExecutionState) -> dict:
     """
     Node 1 — Regional Alpha & Cost Orchestrator
 
-    Phase 1: Gemini discovers ETF universe across 3 tiers.
-    Phase 2: yfinance validates metrics; cost attribution computed.
-    Phase 3: Liquidity filter (ADV < $1M USD excluded); proxy flag; FX notation.
+    Always uses the locked 14-ETF universe — no discovery calls.
+    Fetches yfinance metrics and macro news for all 14 tickers.
+    News feeds Node 2 (signal_scorer) which rotates satellite weights.
 
-    as_of_date in state → backtest mode (date-isolated data + prompts).
-    as_of_date absent   → production mode (current data, no date constraint).
+    Production (as_of_date=None): live yfinance data, latest news.
+    Backtest  (as_of_date set):   historical yfinance + news bounded to as_of_date.
     """
-    ter_threshold = state["ter_threshold"]
-    as_of_date    = state.get("as_of_date")   # None in production
+    as_of_date = state.get("as_of_date")   # None in production
 
-    print(f"\n[Node 1] Regional Alpha & Cost Orchestrator — building universe …")
+    suffix = f" [as-of {as_of_date}]" if as_of_date else ""
+    print(f"\n[Node 1] Building locked 14-ETF universe{suffix} …")
 
-    # ── Phase 1: Discover universe via Gemini ─────────────────────────────────
-    india_recs = _build_india_tier(ter_threshold, as_of_date=as_of_date)
-    us_recs    = _build_us_tier(as_of_date=as_of_date)
-    hk_recs    = _build_hk_proxy_tier(as_of_date=as_of_date)
+    all_tickers = [r["ticker"] for r in _LOCKED_UNIVERSE]
 
-    market_recs: Dict[str, List[Dict[str, Any]]] = {
-        "BSE":  india_recs,
-        "US":   us_recs,
-        "HKCN": hk_recs,
-    }
-    all_tickers = [r["ticker"] for recs in market_recs.values() for r in recs]
-    print(f"[Node 1] Universe: {len(all_tickers)} candidates — fetching yfinance data …")
-
-    # ── Phase 2: yfinance enrichment ──────────────────────────────────────────
+    # ── yfinance enrichment + thematic news ───────────────────────────────────
     raw        = _fetch_yfinance_batch(all_tickers, as_of_date=as_of_date)
-    macro_news = _fetch_news(
-        {m: [r["ticker"] for r in recs] for m, recs in market_recs.items()},
-        as_of_date=as_of_date,
-    )
+    macro_news = _fetch_news(as_of_date=as_of_date)
 
-    etf_data:  Dict[str, ETFRecord] = {}
-    filtered:  List[str]            = []
-    excluded:  List[str]            = []
+    # Group by region for the ETFRecord loop
+    market_recs: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in _LOCKED_UNIVERSE:
+        market_recs.setdefault(entry["region"], []).append(entry)
+
+    etf_data: Dict[str, ETFRecord] = {}
+    filtered: List[str]            = []
 
     for market, recs in market_recs.items():
         for rec in recs:
-            ticker     = rec["ticker"]
-            r          = raw.get(ticker, {})
-            error      = r.get("error")
-            is_hk_local = ticker.endswith(".HK")
-            is_proxy    = rec.get("is_proxy", not is_hk_local and market == "HKCN")
+            ticker  = rec["ticker"]
+            r       = raw.get(ticker, {})
+            error   = r.get("error")
 
-            # TER: yfinance first, then Gemini estimate
+            # TER: yfinance first, then locked universe estimate
             ter = r.get("ter") if not error else None
             if ter is None and rec.get("ter_pct"):
                 ter = rec["ter_pct"] / 100.0
 
-            price  = r.get("price") if not error else None
-            aum_b  = (r.get("aum_b") if not error else None) or (rec.get("aum_b_est") or None)
+            price   = r.get("price")   if not error else None
+            aum_b   = r.get("aum_b")   if not error else None
+            avg_vol = r.get("avg_vol") if not error else None
+            adv     = _adv_usd(ticker, avg_vol, price)
 
-            # ── Phase 3: Liquidity check ──────────────────────────────────
-            avg_vol  = r.get("avg_vol") if not error else None
-            adv      = _adv_usd(ticker, avg_vol, price)
-            liq_ok   = (adv is None) or (adv >= _ADV_MIN_USD)   # unknown → include
+            broker     = _recommend_broker(ticker)
+            entry_cost = (
+                _calc_entry_cost(
+                    expense_ratio=ter if ter is not None else 0.005,
+                    broker=broker,
+                ) if ter is not None else None
+            )
 
-            # ── Cost attribution ──────────────────────────────────────────
-            broker    = _recommend_broker(ticker, is_hkex_local=is_hk_local)
-            entry_cost = _calc_entry_cost(
-                expense_ratio = ter if ter is not None else 0.005,
-                broker        = broker,
-                is_hk_local   = is_hk_local,
-            ) if ter is not None else None
-
-            # ── FX flag in category ───────────────────────────────────────
-            currency = "INR" if market == "BSE" else ("HKD" if is_hk_local else "USD")
-            category = rec.get("category", rec.get("theme", "ETF"))
-            if is_hk_local:
-                category = f"{category} [HKD — FX conversion required]"
-            elif currency == "INR":
-                category = f"{category} [INR — FX via Dhan]"
+            currency = "INR" if market == "BSE" else "USD"
+            category = rec.get("category", "ETF")
+            if currency == "INR":
+                category = f"{category} [INR — via Dhan]"
 
             record: ETFRecord = {
-                "ticker":              ticker,
-                "name":                rec["name"],
-                "region":              market,
-                "market":              "NSE" if market == "BSE" else ("HKEX" if is_hk_local else "NASDAQ"),
-                "category":            category,
-                "expense_ratio":       ter,
-                "aum_b":               aum_b,
-                "ytd_return":          r.get("ytd") if not error else None,
-                "momentum_3m":         r.get("mom3m") if not error else None,
-                "momentum_1m":         r.get("mom1m") if not error else None,
-                "current_price":       price,
-                "currency":            currency,
-                "data_source":         "yfinance" if not error else "gemini_estimate",
-                "fetch_error":         error,
-                # Cost & routing
-                "recommended_broker":  broker,
-                "adv_usd":             adv,
-                "liquidity_ok":        liq_ok,
-                "est_entry_cost_pct":  entry_cost,
-                "is_proxy":            is_proxy,
-                "proxy_for":           rec.get("proxy_for"),
+                "ticker":                 ticker,
+                "name":                   rec["name"],
+                "region":                 market,
+                "market":                 rec.get("market", "NSE" if market == "BSE" else "NASDAQ"),
+                "category":               category,
+                "expense_ratio":          ter,
+                "aum_b":                  aum_b,
+                "ytd_return":             r.get("ytd")    if not error else None,
+                "momentum_3m":            r.get("mom3m")  if not error else None,
+                "momentum_1m":            r.get("mom1m")  if not error else None,
+                "trailing_volatility_3m": r.get("vol_3m") if not error else None,
+                "forward_pe":             r.get("forward_pe")     if not error else None,
+                "beta":                   r.get("beta")           if not error else None,
+                "dividend_yield":         r.get("dividend_yield") if not error else None,
+                "current_price":          price,
+                "currency":               currency,
+                "data_source":            "yfinance" if not error else "locked_estimate",
+                "fetch_error":            error,
+                "recommended_broker":     broker,
+                "adv_usd":                adv,
+                "liquidity_ok":           True,   # locked universe — always included
+                "est_entry_cost_pct":     entry_cost,
+                "is_proxy":               False,
+                "proxy_for":              None,
             }
             etf_data[ticker] = record
+            filtered.append(ticker)   # all 14 always pass
 
-            # Phase 3: reject illiquid, apply TER filter
-            if not liq_ok:
-                excluded.append(ticker)
-                print(f"  [Node 1] EXCLUDED {ticker} — ADV ${adv:,.0f} below $1M minimum")
-                continue
-
-            if ter is not None and ter > ter_threshold:
-                excluded.append(ticker)
-                continue
-
-            filtered.append(ticker)
-
-    print(f"[Node 1] Result: {len(filtered)} ETFs pass | {len(excluded)} excluded")
-    for market in ("BSE", "US", "HKCN"):
-        n = sum(1 for t in filtered if etf_data[t]["region"] == market)
-        proxies = sum(1 for t in filtered if etf_data[t]["region"] == market and etf_data[t]["is_proxy"])
-        print(f"  {market}: {n} ETFs  ({proxies} US proxies for HK)" if market == "HKCN"
-              else f"  {market}: {n} ETFs")
+    print(f"[Node 1] {len(filtered)} ETFs ready "
+          f"({len(_CORE_UNIVERSE_TICKERS)} core + {len(_SATELLITE_UNIVERSE_TICKERS)} satellite)")
 
     return {
         "all_etf_data":     etf_data,

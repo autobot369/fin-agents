@@ -25,8 +25,9 @@ import yfinance as yf
 
 _ROOT     = Path(__file__).resolve().parent.parent   # sip_execution_mas/
 _FIN_ROOT = _ROOT.parent                              # fin-agents/
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+for _p in (str(_FIN_ROOT), str(_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from simulator.ledger import aggregate_holdings, ledger_summary, load_ledger
 
@@ -203,12 +204,19 @@ with st.sidebar:
     summary     = ledger_summary(ledger_raw)
 
     if summary["months"] > 0:
+        _last_entry_sidebar = ledger_raw["entries"][-1] if ledger_raw.get("entries") else {}
+        _va_tag = ""
+        if _last_entry_sidebar.get("va_triggered"):
+            _va_tag = f"  ·  VA x{_last_entry_sidebar.get('va_multiplier', 1.0):.2f}"
         st.success(
             f"✓ **{summary['months']} months** recorded\n\n"
             f"First: {summary['first_investment']}\n\n"
-            f"Last: {summary['last_investment']}\n\n"
+            f"Last: {summary['last_investment']}{_va_tag}\n\n"
             f"Total invested: **{_usd(summary['total_invested_usd'])}**"
         )
+        _va_months = [e for e in ledger_raw.get("entries", []) if e.get("va_triggered")]
+        if _va_months:
+            st.info(f"⚡ **{len(_va_months)} VA month(s)** — crash accumulator fired")
     else:
         st.warning(
             "No investment records yet.\n\n"
@@ -352,12 +360,13 @@ if _has_ledger:
     st.divider()
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab_portfolio, tab_holdings, tab_history, tab_allocation, tab_timeline = st.tabs([
+    tab_portfolio, tab_holdings, tab_history, tab_allocation, tab_timeline, tab_va = st.tabs([
         "🗂 Portfolio",
         "💼 Holdings",
         "📒 Ledger History",
         "📐 Last Allocation",
         "📅 Timeline",
+        "⚡ Value Averaging",
     ])
 
 
@@ -409,7 +418,12 @@ if st.session_state.get("bt_mode"):
         )
 
         # Summary metrics
-        bm1, bm2, bm3, bm4 = st.columns(4)
+        _va_months_bt = [e for e in r["monthly_entries"] if e.get("va_triggered")]
+        _va_extra_usd = sum(
+            e.get("effective_sip", e["sip_amount"]) - e["sip_amount"]
+            for e in r["monthly_entries"]
+        )
+        bm1, bm2, bm3, bm4, bm5 = st.columns(5)
         bm1.metric("Total Invested",  _usd(r["total_invested_usd"]))
         bm2.metric(
             "Portfolio Value",
@@ -419,6 +433,12 @@ if st.session_state.get("bt_mode"):
         )
         bm3.metric("Total Return", _pct(r["total_return_pct"]))
         bm4.metric("CAGR",         _pct(r["cagr"]))
+        bm5.metric(
+            "VA Events",
+            f"{len(_va_months_bt)} month(s)",
+            delta=f"+{_usd(_va_extra_usd)} extra" if _va_extra_usd > 0 else "none triggered",
+            delta_color="normal" if _va_extra_usd > 0 else "off",
+        )
 
         if r["skipped_months"]:
             st.warning("Skipped months: " + ", ".join(r["skipped_months"]))
@@ -467,6 +487,40 @@ if st.session_state.get("bt_mode"):
                 fillcolor="rgba(76,155,232,0.12)",
                 hovertemplate="<b>%{x}</b><br>Value: $%{y:,.2f}<extra></extra>",
             ))
+            # Benchmark lines: 100% SPLG and 100% NIFTYBEES.NS
+            _bench_specs = [
+                ("SPLG",          "100% SPLG (S&P 500)",  "#9B59B6"),
+                ("NIFTYBEES.NS",  "100% NIFTY (India)",   "#E67E22"),
+            ]
+            for _bt_ticker, _bt_label, _bt_color in _bench_specs:
+                _bt_units = 0.0
+                _bt_rows  = []
+                for _be in r["monthly_entries"]:
+                    _bt_pos = next(
+                        (p for p in _be["positions"] if p["ticker"] == _bt_ticker), None
+                    )
+                    if not _bt_pos or not _bt_pos["price_native"]:
+                        continue
+                    _bp      = _bt_pos["price_native"]
+                    _busd_inr = _be["usd_inr_rate"]
+                    _bsip    = _be["sip_amount"]
+                    # Accumulate units as if 100% SIP went here
+                    if _bt_ticker.endswith(".NS"):
+                        _bt_units += (_bsip * _busd_inr) / _bp
+                        _bval = (_bt_units * _bp) / _busd_inr
+                    else:
+                        _bt_units += _bsip / _bp
+                        _bval = _bt_units * _bp
+                    _bt_rows.append({"Month": _be["month"], "Value": round(_bval, 2)})
+                if _bt_rows:
+                    _bt_bench_df = pd.DataFrame(_bt_rows)
+                    _fig_growth.add_trace(go.Scatter(
+                        x=_bt_bench_df["Month"], y=_bt_bench_df["Value"],
+                        name=_bt_label,
+                        line=dict(color=_bt_color, width=2, dash="dash"),
+                        hovertemplate=f"<b>%{{x}}</b><br>{_bt_label}: $%{{y:,.2f}}<extra></extra>",
+                    ))
+
             if r["current_value_usd"] and not _bt_df.empty:
                 _live_color = POSITIVE_COLOR if r["total_pnl_usd"] >= 0 else NEGATIVE_COLOR
                 _fig_growth.add_trace(go.Scatter(
@@ -479,6 +533,18 @@ if st.session_state.get("bt_mode"):
                     name="Live Value",
                     hoverinfo="skip",
                 ))
+            # Mark VA trigger months with vertical lines
+            for _va_e in _va_months_bt:
+                _va_row = next((row for row in _tl_rows if row["Month"] == _va_e["month"]), None)
+                if _va_row:
+                    _va_color = "#FFD700" if _va_e.get("va_multiplier", 1.0) < 1.5 else "#FF6B35"
+                    _fig_growth.add_vline(
+                        x=_va_e["month"],
+                        line_color=_va_color, line_dash="dot", line_width=1.5,
+                        annotation_text=f"VA x{_va_e.get('va_multiplier', 1.0):.2f}",
+                        annotation_font_color=_va_color,
+                        annotation_font_size=10,
+                    )
             _fig_growth.update_layout(
                 paper_bgcolor=BG, plot_bgcolor=BG,
                 xaxis=dict(color="white", gridcolor=GRID),
@@ -560,14 +626,24 @@ if st.session_state.get("bt_mode"):
         # ── Per-month expandable details ──────────────────────────────────────
         st.subheader("Month-by-Month Details")
         for _entry in reversed(r["monthly_entries"]):
-            _scorer_badge = "🤖 Gemini" if _entry["scorer"] == "gemini" else "📊 VADER"
+            _scorer_badge = "🤖 Gemini" if _entry.get("scorer") == "gemini" else "📊 VADER"
+            _va_triggered = _entry.get("va_triggered", False)
+            _va_mult      = _entry.get("va_multiplier", 1.0)
+            _eff_sip      = _entry.get("effective_sip", _entry["sip_amount"])
+            _va_badge     = f"  ·  ⚡ VA x{_va_mult:.2f}" if _va_triggered else ""
             with st.expander(
-                "**{}**  ·  {}  ·  {}  ·  {} positions  ·  {}".format(
+                "**{}**  ·  {}  ·  {}{}  ·  {} positions  ·  {}".format(
                     _entry["month"], _entry["date"],
-                    _usd(_entry["total_invested_usd"]),
+                    _usd(_eff_sip), _va_badge,
                     len(_entry["positions"]), _scorer_badge,
                 )
             ):
+                if _va_triggered:
+                    st.info(
+                        f"⚡ **Crash-Accumulator VA fired** — "
+                        f"Base SIP: {_usd(_entry['sip_amount'])}  →  "
+                        f"Effective SIP: {_usd(_eff_sip)}  (x{_va_mult:.2f})"
+                    )
                 st.dataframe(pd.DataFrame([
                     {
                         "Ticker":    p["ticker"],
@@ -790,12 +866,23 @@ with tab_history:
     st.subheader(f"All Investment Records ({summary['months']} months)")
 
     for entry in reversed(ledger.get("entries", [])):
+        _e_va      = entry.get("va_triggered", False)
+        _e_va_mult = entry.get("va_multiplier", 1.0)
+        _e_eff_sip = entry.get("effective_sip", entry.get("sip_amount", entry["total_invested_usd"]))
+        _e_scorer  = "🤖 Gemini" if entry.get("scorer") == "gemini" else "📊 VADER"
+        _e_va_tag  = f"  ·  ⚡ VA x{_e_va_mult:.2f}" if _e_va else ""
         with st.expander(
             f"**{entry['month']}**  ·  {entry['date']}  ·  "
-            f"${entry['total_invested_usd']:.2f} invested  ·  "
+            f"${_e_eff_sip:.2f} invested{_e_va_tag}  ·  "
             f"{len(entry['positions'])} positions  ·  "
-            f"USD/INR: {entry['usd_inr_rate']:.2f}"
+            f"USD/INR: {entry['usd_inr_rate']:.2f}  ·  {_e_scorer}"
         ):
+            if _e_va:
+                st.info(
+                    f"⚡ **Crash-Accumulator VA** — "
+                    f"Base: {_usd(entry.get('sip_amount', 0))}  →  "
+                    f"Effective: {_usd(_e_eff_sip)}  (x{_e_va_mult:.2f})"
+                )
             pos_rows = [
                 {
                     "Ticker":     p["ticker"],
@@ -811,11 +898,16 @@ with tab_history:
                 for p in entry["positions"]
             ]
             st.dataframe(pd.DataFrame(pos_rows), hide_index=True, use_container_width=True)
+            _boom = entry.get("boom_triggers", [])
+            _macro = entry.get("macro_summary", "")
             st.caption(
                 f"Rankings generated: {entry.get('rankings_generated_at', '—')}  ·  "
                 f"Core: {_usd(entry.get('core_budget', 0))}  ·  "
                 f"Satellite: {_usd(entry.get('satellite_budget', 0))}"
+                + (f"  ·  Boom: {', '.join(_boom)}" if _boom else "")
             )
+            if _macro:
+                st.caption(_macro[:200])
 
     st.divider()
     st.download_button(
@@ -832,13 +924,21 @@ with tab_history:
 
 with tab_allocation:
     last_entry = ledger["entries"][-1]
+    _la_va      = last_entry.get("va_triggered", False)
+    _la_va_mult = last_entry.get("va_multiplier", 1.0)
+    _la_eff_sip = last_entry.get("effective_sip", last_entry.get("sip_amount", 0))
+    _la_scorer  = last_entry.get("scorer", "vader")
     st.subheader(f"Allocation from {last_entry['month']}  ({last_entry['date']})")
     st.caption(
         f"Rankings: {last_entry.get('rankings_generated_at', '—')}  ·  "
-        f"SIP: {_usd(last_entry.get('sip_amount', 0))}  ·  "
+        f"Scorer: {'Gemini' if _la_scorer == 'gemini' else 'VADER'}  ·  "
+        f"Base SIP: {_usd(last_entry.get('sip_amount', 0))}  ·  "
+        f"Effective SIP: {_usd(_la_eff_sip)}  ·  "
         f"Core: {_usd(last_entry.get('core_budget', 0))} / "
         f"Satellite: {_usd(last_entry.get('satellite_budget', 0))}"
     )
+    if _la_va:
+        st.warning(f"⚡ **Crash-Accumulator VA fired this month** — x{_la_va_mult:.2f} multiplier applied")
 
     core_pos = [p for p in last_entry["positions"] if p["bucket"] == "core"]
     sat_pos  = [p for p in last_entry["positions"] if p["bucket"] == "satellite"]
@@ -968,3 +1068,90 @@ with tab_timeline:
         st.dataframe(tl_df.drop(columns=["Color"]), hide_index=True, use_container_width=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  TAB 6 — Value Averaging history
+# ─────────────────────────────────────────────────────────────────────────────
+
+with tab_va:
+    st.subheader("Crash-Accumulator Value-Averaging (VA) History")
+    st.caption(
+        "VA fires when panic sentiment is detected.  "
+        "Tier 1 (momentum > -15%): x1.20 | Tier 2 (momentum <= -15%): x1.50"
+    )
+
+    _all_entries = ledger.get("entries", [])
+    _va_rows = []
+    for _e in _all_entries:
+        _va_rows.append({
+            "Month":          _e["month"],
+            "Base SIP ($)":   _e.get("sip_amount", 0),
+            "Effective ($)":  _e.get("effective_sip", _e.get("sip_amount", 0)),
+            "VA Triggered":   "Yes" if _e.get("va_triggered") else "No",
+            "Multiplier":     _e.get("va_multiplier", 1.0),
+            "Extra Deployed": round(
+                _e.get("effective_sip", _e.get("sip_amount", 0)) - _e.get("sip_amount", 0), 2
+            ),
+            "Scorer":         "Gemini" if _e.get("scorer") == "gemini" else "VADER",
+        })
+
+    if _va_rows:
+        _va_df = pd.DataFrame(_va_rows)
+
+        # Stacked bar: base SIP + extra (VA top-up) per month
+        _fig_va = go.Figure()
+        _fig_va.add_trace(go.Bar(
+            x=_va_df["Month"], y=_va_df["Base SIP ($)"],
+            name="Base SIP",
+            marker_color=CORE_COLOR,
+            hovertemplate="<b>%{x}</b><br>Base SIP: $%{y:,.2f}<extra></extra>",
+        ))
+        _va_extra_series = _va_df["Extra Deployed"].clip(lower=0)
+        _fig_va.add_trace(go.Bar(
+            x=_va_df["Month"], y=_va_extra_series,
+            name="VA Top-up",
+            marker_color="#FFD700",
+            hovertemplate="<b>%{x}</b><br>VA Extra: $%{y:,.2f}<extra></extra>",
+        ))
+        _fig_va.update_layout(
+            barmode="stack",
+            paper_bgcolor=BG, plot_bgcolor=BG,
+            xaxis=dict(color="white", gridcolor=GRID),
+            yaxis=dict(color="white", gridcolor=GRID, tickprefix="$"),
+            legend=dict(font=dict(color="white")),
+            height=320,
+            margin=dict(t=10, b=10),
+        )
+        st.plotly_chart(_fig_va, use_container_width=True)
+
+        # Summary stats
+        _total_va_months = int(_va_df["VA Triggered"].eq("Yes").sum())
+        _total_va_extra  = round(_va_df["Extra Deployed"].sum(), 2)
+        _total_base      = round(_va_df["Base SIP ($)"].sum(), 2)
+        _total_eff       = round(_va_df["Effective ($)"].sum(), 2)
+
+        _vc1, _vc2, _vc3, _vc4 = st.columns(4)
+        _vc1.metric("VA Months", str(_total_va_months))
+        _vc2.metric("Extra Capital Deployed", _usd(_total_va_extra))
+        _vc3.metric("Base SIP Total", _usd(_total_base))
+        _vc4.metric("Effective Total", _usd(_total_eff))
+
+        # Scorer breakdown
+        _gemini_months = int(_va_df["Scorer"].eq("Gemini").sum())
+        _vader_months  = int(_va_df["Scorer"].eq("VADER").sum())
+        st.caption(
+            f"Scorer breakdown:  🤖 Gemini: {_gemini_months} months  ·  "
+            f"📊 VADER: {_vader_months} months"
+        )
+
+        # Detailed table
+        st.subheader("Month-by-Month VA Log")
+        st.dataframe(
+            _va_df.style.map(
+                lambda v: "color: #FFD700; font-weight: bold" if v == "Yes" else "",
+                subset=["VA Triggered"]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("No ledger entries yet. Run the scheduler to record your first investment.")

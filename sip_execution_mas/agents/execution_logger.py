@@ -93,6 +93,12 @@ def _build_ledger_entry_from_results(
         prices                = price_map,
         usd_inr_rate          = usd_inr,
         rankings_generated_at = datetime.now().strftime("%Y-%m-%d"),
+        va_triggered          = state.get("va_triggered", False),
+        va_multiplier         = state.get("va_multiplier", 1.0),
+        effective_sip         = state.get("effective_sip"),
+        scorer                = state.get("scorer_source", "vader"),
+        boom_triggers         = state.get("boom_triggers", []),
+        macro_summary         = state.get("macro_summary", ""),
     )
     save_ledger(ledger, ledger_path)
     print(f"  [Node 6] Ledger updated → {ledger_path}")
@@ -197,6 +203,13 @@ def _print_summary(run_id: str, state: SIPExecutionState) -> None:
     except Exception:
         pass
 
+    va_triggered  = state.get("va_triggered", False)
+    va_multiplier = state.get("va_multiplier", 1.0)
+    effective_sip = state.get("effective_sip")
+    scorer_source = state.get("scorer_source", "vader")
+    if va_triggered and effective_sip:
+        print(f"  VA: x{va_multiplier:.2f} — base ${sip:.0f} -> effective ${effective_sip:.0f}")
+    print(f"  Scorer: {scorer_source}")
     print(f"\n  Macro: {state.get('macro_summary', '')[:120]}")
     triggers = state.get("boom_triggers", [])
     if triggers:

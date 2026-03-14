@@ -15,6 +15,7 @@ Rules:
 
 from __future__ import annotations
 
+import time
 import warnings
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
@@ -265,50 +266,118 @@ def run_backtest(
 
 # ── Month-by-month historical backtest ────────────────────────────────────────
 
+def _fixed_bucket_alloc(
+    tickers: List[str],
+    consensus_scores: dict,
+    sip_amount: float,
+    all_etf_data: dict,
+    sentiment_scores: dict,
+    expense_scores: dict,
+    macro_summary: str,
+) -> List[dict]:
+    """
+    Fixed 70/30 Core/Satellite allocation using pseudo-Sharpe consensus scores.
+    All 14 locked tickers always receive a position — none are dropped.
+    """
+    from sip_execution_mas.agents.regional_researcher import (
+        _CORE_UNIVERSE_TICKERS, _SATELLITE_UNIVERSE_TICKERS,
+    )
+
+    core_budget      = round(sip_amount * 0.70, 2)
+    satellite_budget = round(sip_amount * 0.30, 2)
+
+    def _alloc_bucket(bucket_tickers, budget, bucket_name):
+        total = sum(max(consensus_scores.get(t, 0.01), 0.01) for t in bucket_tickers) or 1.0
+        allocs = []
+        for t in bucket_tickers:
+            etf    = all_etf_data.get(t, {})
+            score  = max(consensus_scores.get(t, 0.01), 0.01)
+            usd    = round(budget * score / total, 2)
+            region = etf.get("region", "US")
+            allocs.append({
+                "ticker":          t,
+                "name":            etf.get("name", t),
+                "bucket":          bucket_name,
+                "region":          region,
+                "market":          etf.get("market", "NSE" if region == "BSE" else "NASDAQ"),
+                "category":        etf.get("category", "—"),
+                "currency":        "INR" if region == "BSE" else "USD",
+                "consensus_score": round(score / total, 4),
+                "sentiment_score": round(sentiment_scores.get(t, 0.50), 4),
+                "expense_score":   round(expense_scores.get(t, 0.50), 4),
+                "monthly_usd":     usd,
+                "weight":          round(usd / sip_amount, 5),
+                "sentiment_rationale": macro_summary[:120],
+            })
+        # Snap rounding drift to top ticker in bucket
+        drift = round(budget - sum(a["monthly_usd"] for a in allocs), 2)
+        if drift != 0 and allocs:
+            allocs[0]["monthly_usd"] = round(allocs[0]["monthly_usd"] + drift, 2)
+            allocs[0]["weight"]      = round(allocs[0]["monthly_usd"] / sip_amount, 5)
+        return allocs
+
+    core_tickers      = [t for t in tickers if t in _CORE_UNIVERSE_TICKERS]
+    satellite_tickers = [t for t in tickers if t in _SATELLITE_UNIVERSE_TICKERS]
+
+    allocs  = _alloc_bucket(core_tickers,      core_budget,      "core")
+    allocs += _alloc_bucket(satellite_tickers, satellite_budget, "satellite")
+    return allocs
+
+
 def run_historical_backtest(
     start_date: date,
     end_date: date,
     sip_amount: float = 500.0,
     day_of_month: int = 1,
-    top_n: int = 10,
-    core_count: int = 5,
-    core_pct: float = 0.70,
-    ter_threshold: float = 0.007,       # decimal — e.g. 0.007 = 0.70%
+    ter_threshold: float = 0.007,       # decimal — used in expense_score formula
     usd_inr_rate: float = 83.50,
     progress_callback=None,
+    gemini_ratelimit_delay: float = 5.0,
+    use_llm: bool = True,
 ) -> HistoricalBacktestResult:
     """
-    Month-by-month historical SIP backtest with per-month ETF research.
+    Month-by-month historical SIP backtest with locked 14-ETF universe.
 
     For each calendar month in [start_date, end_date):
-      1. Gemini discovers the ETF universe (date-isolated prompt — no future events).
+      1. Uses the locked 14-ETF universe (no discovery — same tickers every month).
       2. yfinance fetches metrics bounded to as_of_date.
       3. News is filtered to articles published on or before as_of_date.
       4. Gemini (or VADER fallback) scores sentiment for that date only.
-      5. Allocation is computed and units are bought at the historical price.
+         Sentiment rotates satellite weights — core weights are stable.
+      5. Crash-Accumulator VA: if panic + negative momentum, effective SIP
+         scales by 1.20× (Tier 1) or 1.50× (Tier 2) — mirrors Node 4 logic.
+      6. Fixed 70/30 bucket allocation using effective_sip.
+      7. Hard rules 1/2/3/5 validated (no duplicate-month check in backtest).
+      8. Units are bought at the historical price for that month.
 
     Args:
-        start_date:        First month to invest (inclusive).
-        end_date:          Stop before this date (exclusive).
-        sip_amount:        Monthly SIP budget in USD.
-        top_n:             Total ETFs to invest in (core + satellite).
-        core_count:        Number of top ETFs in the core bucket.
-        core_pct:          Fraction of SIP allocated to core (e.g. 0.70).
-        ter_threshold:     Max expense ratio as decimal (0.007 = 0.70%).
-        usd_inr_rate:      USD/INR rate used for BSE ticker conversions.
-        progress_callback: Optional callable(msg: str) for progress updates.
+        start_date:              First month to invest (inclusive).
+        end_date:                Stop before this date (exclusive).
+        sip_amount:              Base monthly SIP budget in USD (before VA scaling).
+        ter_threshold:           Expense ratio ceiling used in expense_score formula
+                                 (decimal, e.g. 0.007 = 0.70%).
+        usd_inr_rate:            USD/INR rate for BSE ticker conversions.
+        progress_callback:       Optional callable(msg: str) for progress updates.
+        gemini_ratelimit_delay:  Seconds to sleep after each Gemini call to stay
+                                 within API rate limits (default 5.0 s ≈ 12 RPM).
+                                 Set to 0 to disable. Ignored when use_llm=False.
+        use_llm:                 True (default) → use Gemini for sentiment scoring.
+                                 False → use VADER only (faster, no API calls).
 
     Returns:
         HistoricalBacktestResult with per-month entries and aggregate holdings.
     """
     import calendar as _cal
-    from simulator.allocator import compute_allocation
     from sip_execution_mas.agents.regional_researcher import (
-        _build_india_tier, _build_us_tier, _build_hk_proxy_tier,
-        _fetch_yfinance_batch, _fetch_news, _FALLBACK,
-        _adv_usd, _ADV_MIN_USD, _recommend_broker, _calc_entry_cost,
+        _LOCKED_UNIVERSE,
+        _fetch_yfinance_batch, _fetch_news,
+        _recommend_broker, _adv_usd,
     )
     from sip_execution_mas.agents.signal_scorer import score_etfs
+    from sip_execution_mas.agents.risk_auditor import (
+        _detect_va_condition,
+        VA_MULTIPLIER_TIER1, VA_MULTIPLIER_TIER2,
+    )
 
     def _log(msg: str) -> None:
         print(msg)
@@ -320,173 +389,191 @@ def run_historical_backtest(
         len(month_list), start_date.isoformat(), end_date.isoformat(),
     ))
 
-    # Pre-seed the price cache with the fallback universe so common tickers
-    # don't need repeated downloads across months. Any Gemini-discovered ticker
-    # not in the fallback is fetched lazily on first encounter.
-    buf_start = start_date - timedelta(days=10)
-    fallback_tickers = [r["ticker"] for recs in _FALLBACK.values() for r in recs]
-    _log("[backtest] Pre-fetching price history for {} seed ETFs …".format(len(fallback_tickers)))
+    # Pre-seed the price cache with all 14 locked tickers
+    buf_start      = start_date - timedelta(days=10)
+    locked_tickers = [r["ticker"] for r in _LOCKED_UNIVERSE]
+    _log("[backtest] Pre-fetching price history for {} locked ETFs …".format(len(locked_tickers)))
     price_cache: dict = {}
-    for t in fallback_tickers:
+    for t in locked_tickers:
         price_cache[t] = _fetch_history(t, buf_start, date.today())
     _log("[backtest] Price cache ready — starting month loop …\n")
+
+    # Group locked universe by region for ETFRecord building
+    _market_recs: dict = {}
+    for entry in _LOCKED_UNIVERSE:
+        _market_recs.setdefault(entry["region"], []).append(entry)
 
     # ── Month loop ────────────────────────────────────────────────────────────
     units_held:      dict = {}   # ticker → cumulative units
     invested:        dict = {}   # ticker → cumulative USD invested
-    last_alloc_meta: dict = {}   # ticker → latest ETFAllocation metadata
+    last_alloc_meta: dict = {}   # ticker → latest allocation metadata
     monthly_entries = []
     skipped_months  = []
     total_invested_usd = 0.0
 
     for month_date in month_list:
         month_str = month_date.strftime("%Y-%m")
-        # Clamp day_of_month to the last day of the month (handles Feb, 30-day months)
         last_day  = _cal.monthrange(month_date.year, month_date.month)[1]
         buy_date  = date(month_date.year, month_date.month, min(day_of_month, last_day))
         _log("[backtest] ── {} (buy date: {}) ──────────────────────────────────────".format(
             month_str, buy_date.isoformat()
         ))
 
-        # ── Phase 1: Gemini discovers universe as of buy_date ────────────────
         try:
-            india_recs = _build_india_tier(ter_threshold, as_of_date=buy_date)
-            us_recs    = _build_us_tier(as_of_date=month_date)
-            hk_recs    = _build_hk_proxy_tier(as_of_date=month_date)
+            # ── Phase 1: Build ETFRecord for all 14 locked ETFs ──────────────
+            raw        = _fetch_yfinance_batch(locked_tickers, as_of_date=buy_date)
+            macro_news = _fetch_news(as_of_date=buy_date)
 
-            market_recs = {"BSE": india_recs, "US": us_recs, "HKCN": hk_recs}
-            all_tickers = [r["ticker"] for recs in market_recs.values() for r in recs]
-
-            # ── Phase 2: yfinance enrichment (date-bounded) ───────────────────
-            raw        = _fetch_yfinance_batch(all_tickers, as_of_date=buy_date)
-            macro_news = _fetch_news(
-                {m: [r["ticker"] for r in recs] for m, recs in market_recs.items()},
-                as_of_date=buy_date,
-            )
-
-            # ── Phase 3: ETFRecord + TER / liquidity filter ───────────────────
-            all_etf_data: dict     = {}
-            filtered_tickers: list = []
-
-            for market, recs in market_recs.items():
+            all_etf_data: dict = {}
+            for market, recs in _market_recs.items():
                 for rec in recs:
-                    ticker      = rec["ticker"]
-                    r           = raw.get(ticker, {})
-                    error       = r.get("error")
-                    is_hk_local = ticker.endswith(".HK")
-                    is_proxy    = rec.get("is_proxy", not is_hk_local and market == "HKCN")
+                    ticker  = rec["ticker"]
+                    r       = raw.get(ticker, {})
+                    error   = r.get("error")
 
                     ter = r.get("ter") if not error else None
                     if ter is None and rec.get("ter_pct"):
                         ter = rec["ter_pct"] / 100.0
 
-                    price   = r.get("price") if not error else None
-                    aum_b   = (r.get("aum_b") if not error else None) or rec.get("aum_b_est")
+                    price   = r.get("price")   if not error else None
                     avg_vol = r.get("avg_vol") if not error else None
+                    aum_b   = r.get("aum_b")   if not error else None
                     adv     = _adv_usd(ticker, avg_vol, price)
-                    liq_ok  = (adv is None) or (adv >= _ADV_MIN_USD)
-
-                    broker     = _recommend_broker(ticker, is_hkex_local=is_hk_local)
-                    entry_cost = (
-                        _calc_entry_cost(
-                            expense_ratio=ter if ter is not None else 0.005,
-                            broker=broker,
-                            is_hk_local=is_hk_local,
-                        ) if ter is not None else None
-                    )
-
-                    currency = "INR" if market == "BSE" else ("HKD" if is_hk_local else "USD")
-                    category = rec.get("category", rec.get("theme", "ETF"))
-                    if is_hk_local:
-                        category = f"{category} [HKD — FX conversion required]"
-                    elif currency == "INR":
-                        category = f"{category} [INR — FX via Dhan]"
+                    broker  = _recommend_broker(ticker)
+                    currency = "INR" if market == "BSE" else "USD"
+                    category = rec.get("category", "ETF")
+                    if currency == "INR":
+                        category = f"{category} [INR — via Dhan]"
 
                     all_etf_data[ticker] = {
-                        "ticker":        ticker,
-                        "name":          rec["name"],
-                        "region":        market,
-                        "market":        "NSE" if market == "BSE" else ("HKEX" if is_hk_local else "NASDAQ"),
-                        "category":      category,
-                        "expense_ratio": ter,
-                        "aum_b":         aum_b,
-                        "ytd_return":    r.get("ytd") if not error else None,
-                        "momentum_3m":   r.get("mom3m") if not error else None,
-                        "momentum_1m":   r.get("mom1m") if not error else None,
-                        "current_price": price,
-                        "currency":      currency,
-                        "is_proxy":      is_proxy,
-                        "proxy_for":     rec.get("proxy_for"),
+                        "ticker":                 ticker,
+                        "name":                   rec["name"],
+                        "region":                 market,
+                        "market":                 rec.get("market", "NSE" if market == "BSE" else "NASDAQ"),
+                        "category":               category,
+                        "expense_ratio":          ter,
+                        "aum_b":                  aum_b,
+                        "ytd_return":             r.get("ytd")           if not error else None,
+                        "momentum_3m":            r.get("mom3m")         if not error else None,
+                        "momentum_1m":            r.get("mom1m")         if not error else None,
+                        "trailing_volatility_3m": r.get("vol_3m")        if not error else None,
+                        "forward_pe":             r.get("forward_pe")    if not error else None,
+                        "beta":                   r.get("beta")          if not error else None,
+                        "dividend_yield":         r.get("dividend_yield") if not error else None,
+                        "current_price":          price,
+                        "currency":               currency,
+                        "is_proxy":               False,
+                        "proxy_for":              None,
                     }
 
-                    if not liq_ok or (ter is not None and ter > ter_threshold):
-                        continue
-                    filtered_tickers.append(ticker)
+            filtered_tickers = locked_tickers   # all 14 always included
 
-            if not filtered_tickers:
-                _log("[backtest] {} no ETFs after filtering — skipping".format(month_str))
-
-                skipped_months.append(month_str)
-                continue
-
-            # ── Phase 4: Score via Gemini / VADER (date-isolated) ─────────────
-            sentiment_scores, boom_triggers, macro_summary = score_etfs(
-                filtered_tickers=filtered_tickers,
-                all_etf_data=all_etf_data,
-                all_macro_news=macro_news,
-                reference_date=buy_date,
+            # ── Phase 2: Score via Gemini / VADER (date-isolated) ─────────────
+            sentiment_scores, boom_triggers, macro_summary, scorer_source = score_etfs(
+                filtered_tickers = filtered_tickers,
+                all_etf_data     = all_etf_data,
+                all_macro_news   = macro_news,
+                reference_date   = buy_date,
+                _force_vader     = not use_llm,
             )
 
-            # ── Phase 5: Build ranked list for allocator ──────────────────────
-            rankings: list = []
+            # Rate-limit pacing — sleep after Gemini calls to avoid 429
+            if use_llm and scorer_source == "gemini" and gemini_ratelimit_delay > 0:
+                time.sleep(gemini_ratelimit_delay)
+
+            # ── Phase 3: Pseudo-Sharpe consensus — same formula as production ──
+            _BT_VOL_FLOOR = 0.05
+            _raw_cs: dict = {}
+            expense_scores: dict = {}
             for ticker in filtered_tickers:
                 etf           = all_etf_data[ticker]
                 ter           = etf.get("expense_ratio")
-                expense_score = max(0.0, 1.0 - ter / ter_threshold) if ter is not None else 0.50
+                exp_score     = max(0.0, 1.0 - ter / ter_threshold) if ter is not None else 0.50
                 sentiment     = sentiment_scores.get(ticker, 0.50)
-                consensus     = round(0.60 * sentiment + 0.40 * expense_score, 4)
-                region        = etf["region"]
+                vol           = etf.get("trailing_volatility_3m")
+                vol_dec       = max(_BT_VOL_FLOOR, float(vol)) if vol else _BT_VOL_FLOOR
+                _raw_cs[ticker]        = (0.60 * sentiment + 0.40 * exp_score) / vol_dec
+                expense_scores[ticker] = round(exp_score, 4)
 
-                rankings.append({
-                    "ticker":              ticker,
-                    "name":                etf["name"],
-                    "region":              region,
-                    "market_label":        "NSE" if region == "BSE" else "NASDAQ",
-                    "category":            etf.get("category", "—"),
-                    "trade_on":            "Dhan" if region == "BSE" else "Alpaca",
-                    "expense_ratio":       ter,
-                    "momentum_3m":         etf.get("momentum_3m"),
-                    "sentiment_score":     round(sentiment, 4),
-                    "expense_score":       round(expense_score, 4),
-                    "consensus_score":     consensus,
-                    "sentiment_rationale": macro_summary[:120],
-                })
-            rankings.sort(key=lambda x: x["consensus_score"], reverse=True)
+            _max_raw = max(_raw_cs.values()) if _raw_cs else 1.0
+            if _max_raw <= 0:
+                _max_raw = 1.0
+            consensus_scores = {t: round(_raw_cs[t] / _max_raw, 4) for t in filtered_tickers}
+
+            # ── Phase 3b: Crash-Accumulator VA — mirrors Node 4 logic ─────────
+            va_mult, va_reason = _detect_va_condition(
+                tickers          = filtered_tickers,
+                sentiment_scores = sentiment_scores,
+                all_etf_data     = all_etf_data,
+                boom_triggers    = boom_triggers,
+            )
+            effective_sip = round(sip_amount * va_mult, 2)
+            va_triggered  = va_mult > 1.0
+
+            if va_triggered:
+                tier_label = (
+                    "TIER 2 — Generational Crash" if va_mult >= VA_MULTIPLIER_TIER2
+                    else "TIER 1 — Standard Dip"
+                )
+                _log(
+                    f"  [backtest] ⚡ VALUE-AVERAGING {tier_label} — "
+                    f"SIP ${sip_amount:.2f} → ${effective_sip:.2f} "
+                    f"(×{va_mult:.2f})  |  {va_reason}"
+                )
+
+            # ── Phase 4: Fixed 70/30 bucket allocation (using effective SIP) ──
+            allocs = _fixed_bucket_alloc(
+                tickers          = filtered_tickers,
+                consensus_scores = consensus_scores,
+                sip_amount       = effective_sip,
+                all_etf_data     = all_etf_data,
+                sentiment_scores = sentiment_scores,
+                expense_scores   = expense_scores,
+                macro_summary    = macro_summary,
+            )
+
+            # ── Phase 4b: Hard rule validation (Rules 1/2/3/5 — no Rule 4) ───
+            _MAX_POS_PCT = 0.15
+            _MAX_REG_PCT = 0.50
+            _rule_violations: list = []
+            if not allocs:
+                _rule_violations.append("RULE_5: No allocations generated")
+            else:
+                for _a in allocs:
+                    if _a["monthly_usd"] > effective_sip * _MAX_POS_PCT:
+                        _rule_violations.append(
+                            f"RULE_1: {_a['ticker']} ${_a['monthly_usd']:.2f} "
+                            f"> {_MAX_POS_PCT*100:.0f}% cap"
+                        )
+                    if _a["monthly_usd"] < 1.0:
+                        _rule_violations.append(
+                            f"RULE_3: {_a['ticker']} ${_a['monthly_usd']:.2f} < $1.00"
+                        )
+                _reg_totals: dict = {}
+                for _a in allocs:
+                    _reg_totals[_a["region"]] = (
+                        _reg_totals.get(_a["region"], 0.0) + _a["monthly_usd"]
+                    )
+                for _reg, _tot in _reg_totals.items():
+                    if _tot > effective_sip * _MAX_REG_PCT:
+                        _rule_violations.append(
+                            f"RULE_2: Region {_reg} ${_tot:.2f} "
+                            f"> {_MAX_REG_PCT*100:.0f}% cap"
+                        )
+            if _rule_violations:
+                for _rv in _rule_violations:
+                    _log(f"  [backtest] ⚠ RULE VIOLATION (informational): {_rv}")
 
         except Exception as exc:
             _log("[backtest] {} research failed ({}) — skipping".format(month_str, exc))
             skipped_months.append(month_str)
             continue
 
-        # Lazily populate price cache for any newly discovered tickers
-        new_tickers = [r["ticker"] for r in rankings if r["ticker"] not in price_cache]
-        for t in new_tickers:
-            price_cache[t] = _fetch_history(t, buf_start, date.today())
-
-        # ── Allocation ────────────────────────────────────────────────────────
-        plan = compute_allocation(
-            rankings   = rankings,
-            sip_amount = sip_amount,
-            top_n      = top_n,
-            core_count = core_count,
-            core_pct   = core_pct,
-        )
-
-        # ── Buy each ETF at the first available price on/after month_date ─────
+        # ── Buy each ETF at the first available price on/after buy_date ───────
         positions: list = []
         month_usd = 0.0
 
-        for alloc in plan["all"]:
+        for alloc in allocs:
             ticker = alloc["ticker"]
             df     = price_cache.get(ticker)
             if df is not None and not df.empty:
@@ -531,17 +618,21 @@ def run_historical_backtest(
             month               = month_str,
             date                = buy_date.isoformat(),
             sip_amount          = sip_amount,
-            core_budget         = plan["core_budget"],
-            satellite_budget    = plan["satellite_budget"],
+            effective_sip       = effective_sip,
+            core_budget         = round(effective_sip * 0.70, 2),
+            satellite_budget    = round(effective_sip * 0.30, 2),
             total_invested_usd  = round(month_usd, 2),
             positions           = positions,
             boom_triggers       = boom_triggers,
             macro_summary       = macro_summary,
-            scorer              = "gemini",
+            scorer              = scorer_source,
+            va_triggered        = va_triggered,
+            va_multiplier       = va_mult,
             usd_inr_rate        = usd_inr_rate,
         ))
-        _log("[backtest] {} done: {} positions, ${:.2f} invested\n".format(
-            month_str, len(positions), month_usd,
+        va_tag = f" [VA ×{va_mult:.2f}]" if va_triggered else ""
+        _log("[backtest] {} done: {} positions, ${:.2f} invested (base SIP ${:.2f}{})\n".format(
+            month_str, len(positions), month_usd, sip_amount, va_tag,
         ))
 
     # ── Compute current value using latest prices ─────────────────────────────

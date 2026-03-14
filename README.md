@@ -99,7 +99,7 @@ consensus_score = 0.60 × sentiment_score + 0.40 × expense_score
 
 ## sip-execution-mas
 
-A 6-node LangGraph execution loop that dynamically discovers ETF candidates via Gemini, scores sentiment, allocates a monthly SIP budget with core/satellite bucketing, audits against hard risk rules, and executes orders (paper or live).
+A 6-node LangGraph execution loop that invests a **locked 14-ETF universe** each month. Node 1 fetches yfinance fundamentals + thematic DDGS news; Gemini (Node 2) acts as a 10-year horizon macro strategist to score sentiment and rotate satellite capital; hard risk rules audit the allocation; orders execute in paper or live mode.
 
 **Pipeline:**
 ```
@@ -110,16 +110,31 @@ researcher → scorer → optimizer → auditor
                           abort    → logger (exits after 2 retries)
 ```
 
+**Fixed universe — two permanent buckets:**
+
+| Bucket | Tickers | Budget |
+|--------|---------|--------|
+| **Core** (broad market anchors) | VTI, SPLG, SPDW, SPEM, FLIN, NIFTYBEES.NS, QUAL | 70% of SIP |
+| **Satellite** (sectors / tech / green) | XLK, QQQM, SOXQ, ICLN, USCA, ESGV, XLY | 30% of SIP |
+
+Gemini sentiment rotates *how much* each satellite ETF receives — no ETF is ever dropped. Universe is identical in production and backtest; no Gemini discovery calls.
+
+**Node 1 — data payload per ETF:**
+- **Hard fundamentals:** `fwdPE`, `beta`, `dividend_yield`, `momentum_3m`, `ytd_return`, `trailing_volatility_3m`, `TER`
+- **Thematic news (4 categories, 2 DDGS queries each):** `TECH_SEMIS` · `GREEN_ESG` · `INDIA_EM` · `QUALITY_CORE`
+
+**Node 2 — 10-year horizon macro strategist (Gemini):**
+Each ETF is evaluated via a structured block pairing `[Fundamentals]` (valuation anchor) with `[Sector News — CATEGORY]` (capital-flow catalysts). Scoring rules: P/E ceilings (>40x tech → max 0.75), beta regime scaling, dividend quality signal, structural-vs-cyclical distinction. Falls back to category-aware VADER if Gemini is unavailable.
+
 **Usage:**
 ```bash
 cd sip_execution_mas
 pip install -r requirements.txt
 
-python -m sip_execution_mas                              # Dry-run, $500 SIP
-python -m sip_execution_mas --sip 750 --top 12 --core 6
-python -m sip_execution_mas --ter 0.30                   # Strict TER filter
-python -m sip_execution_mas --live                       # Live Alpaca trading
-python -m sip_execution_mas --force                      # Bypass same-month rule
+python -m sip_execution_mas                  # Dry-run, $500 SIP
+python -m sip_execution_mas --sip 750        # Custom SIP amount
+python -m sip_execution_mas --live           # Live Alpaca trading
+python -m sip_execution_mas --force          # Bypass same-month rule
 ```
 
 **Options:**
@@ -127,21 +142,29 @@ python -m sip_execution_mas --force                      # Bypass same-month rul
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--sip` | `500` | Monthly SIP budget in USD |
-| `--top` | `10` | Number of ETFs to select |
-| `--core` | `5` | Number of core (low-risk) ETFs |
-| `--ter` | `0.70` | Max TER % ceiling |
-| `--max-position` | `0.25` | Max single-ETF allocation (fraction) |
+| `--ter` | `0.70` | TER % used in expense scoring (all 14 ETFs always included) |
+| `--max-position` | `0.15` | Max single-ETF allocation (fraction) |
 | `--max-region` | `0.50` | Max single-region allocation (fraction) |
 | `--live` | off | Enable live Alpaca order submission |
 | `--force` | off | Bypass same-month duplicate check |
 
-**Allocation logic:**
+**Scoring formula (pseudo-Sharpe rank):**
 ```
-core_budget      = sip_amount × core_pct
-satellite_budget = sip_amount × (1 − core_pct)
+expense_score_i  = max(0, 1 − TER_i / ter_threshold)
+consensus_score_i = ((0.60 × sentiment_i + 0.40 × expense_i) / vol_i) / max_batch
+```
+High-volatility ETFs are penalised; all scores are batch-normalised to [0, 1].
+
+**Allocation:**
+```
+core_budget      = sip_amount × 0.70     (always)
+satellite_budget = sip_amount × 0.30     (always)
 weight_i         = consensus_score_i / Σ scores_in_bucket
 allocation_i     = weight_i × bucket_budget
 ```
+
+**Value-Averaging multiplier (Node 4):**
+When Gemini signals severe macro panic AND portfolio momentum shows a price floor (not free-fall), the SIP is automatically scaled up 20%: `effective_sip = sip × 1.20`.
 
 **5 hard risk rules (auditor):**
 1. No single ETF > `max_position_pct × SIP`
@@ -165,8 +188,8 @@ allocation_i     = weight_i × bucket_budget
 **Simulator sub-package:**
 
 ```bash
-# Backtest historical SIP
-python -m simulator.main --sip 500 --months 24 --top 10
+# Backtest historical SIP (locked universe, date-bounded yfinance + news)
+python -m simulator.main --sip 500 --months 24
 
 # Monthly scheduler (runs 1st of each month at 09:00)
 python -m simulator.scheduler
@@ -176,7 +199,7 @@ python -m simulator.scheduler --now      # Immediate one-off run
 streamlit run sip_execution_mas/simulator/app.py
 ```
 
-**Env vars:** `GEMINI_API_KEY` (required) · `ALPACA_API_KEY` + `ALPACA_SECRET_KEY` (optional, live trading) · `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` (optional, future)
+**Env vars:** `GEMINI_API_KEY` (recommended — falls back to VADER) · `ALPACA_API_KEY` + `ALPACA_SECRET_KEY` (optional, live trading) · `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` (optional, future)
 
 ---
 

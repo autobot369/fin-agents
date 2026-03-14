@@ -88,7 +88,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _run_mas(ter: float, top_n: int) -> None:
     mas_dir = _FIN_ROOT / "etf-selection-mas"
-    print(f"[simulator] Running etf-selection-mas pipeline (TER ≤ {ter}%, top {top_n}) …")
+    print(f"[simulator] Running etf-selection-mas pipeline (TER <= {ter}%, top {top_n}) ...")
     result = subprocess.run(
         [sys.executable, "main.py", "--ter", str(ter), "--top", str(top_n)],
         cwd=str(mas_dir),
@@ -106,9 +106,9 @@ def _run_sip_mas_rankings(ter: float, top_n: int, core_count: int) -> list:
     """
     import os
     if not os.environ.get("GEMINI_API_KEY"):
-        print("[simulator] WARNING: GEMINI_API_KEY not set — Signal Scorer will use VADER fallback")
+        print("[simulator] WARNING: GEMINI_API_KEY not set - Signal Scorer will use VADER fallback")
 
-    print(f"[simulator] Running sip_execution_mas Gemini pipeline (TER ≤ {ter}%, top {top_n}) …")
+    print(f"[simulator] Running sip_execution_mas Gemini pipeline (TER <= {ter}%, top {top_n}) ...")
     from sip_execution_mas.graph.workflow import run_sip_execution
 
     final_state = run_sip_execution(
@@ -218,12 +218,12 @@ def main() -> None:
     )
 
     # Step 2 — Exchange rate
-    print(f"[simulator] Fetching USD/INR exchange rate …")
+    print(f"[simulator] Fetching USD/INR exchange rate ...")
     usd_inr = get_usd_inr_rate()
     print(f"[simulator] USD/INR: {usd_inr:.2f}")
 
     # Step 3 — Backtest (buy-only)
-    print(f"[simulator] Running {args.months}-month buy-only backtest …")
+    print(f"[simulator] Running {args.months}-month buy-only backtest ...")
     result = run_backtest(plan, months=args.months, usd_inr_rate=usd_inr)
 
     # Step 4 — Terminal report
@@ -241,7 +241,7 @@ def main() -> None:
     date_str  = datetime.today().strftime("%Y%m%d")
     out_path  = _OUTPUT_DIR / f"SIP_SIMULATION_{date_str}.md"
     save_report(md, str(out_path))
-    print(f"[simulator] Report saved → {out_path}")
+    print(f"[simulator] Report saved -> {out_path}")
 
 
 if __name__ == "__main__":

@@ -71,6 +71,12 @@ def build_and_append_entry(
     prices: Dict[str, float],     # ticker → current price in native currency
     usd_inr_rate: float,
     rankings_generated_at: str,
+    va_triggered: bool = False,
+    va_multiplier: float = 1.0,
+    effective_sip: Optional[float] = None,
+    scorer: str = "vader",
+    boom_triggers: Optional[List[str]] = None,
+    macro_summary: str = "",
 ) -> Dict[str, Any]:
     """
     Record this month's SIP investment into the ledger.
@@ -120,6 +126,12 @@ def build_and_append_entry(
         "rankings_generated_at": rankings_generated_at,
         "usd_inr_rate":          round(usd_inr_rate, 4),
         "sip_amount":            plan["sip_amount"],
+        "effective_sip":         round(effective_sip if effective_sip is not None else plan["sip_amount"], 2),
+        "va_triggered":          va_triggered,
+        "va_multiplier":         va_multiplier,
+        "scorer":                scorer,
+        "boom_triggers":         boom_triggers or [],
+        "macro_summary":         macro_summary,
         "core_budget":           plan["core_budget"],
         "satellite_budget":      plan["satellite_budget"],
         "core_pct":              plan["core_pct"],

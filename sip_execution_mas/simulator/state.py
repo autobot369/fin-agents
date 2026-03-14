@@ -96,7 +96,8 @@ class BacktestMonthEntry(TypedDict):
     """Research + investment record for a single calendar month."""
     month: str                     # "YYYY-MM"
     date: str                      # "YYYY-MM-DD" (first trading day used as buy date)
-    sip_amount: float
+    sip_amount: float              # base SIP (before VA scaling)
+    effective_sip: float           # actual SIP deployed (base × va_multiplier)
     core_budget: float
     satellite_budget: float
     total_invested_usd: float
@@ -104,6 +105,8 @@ class BacktestMonthEntry(TypedDict):
     boom_triggers: List[str]
     macro_summary: str
     scorer: str                    # "gemini" | "vader"
+    va_triggered: bool             # True when Crash-Accumulator VA fired this month
+    va_multiplier: float           # 1.0 | 1.20 | 1.50
     usd_inr_rate: float
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import date as _Date
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -42,6 +43,39 @@ def _parse_json(text: str) -> dict:
     return json.loads(text)
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Detect Gemini 429 / ResourceExhausted errors from any SDK version."""
+    exc_str = str(exc).upper()
+    if "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str or "RATE_LIMIT" in exc_str:
+        return True
+    try:
+        from google.api_core.exceptions import ResourceExhausted
+        if isinstance(exc, ResourceExhausted):
+            return True
+    except ImportError:
+        pass
+    return False
+
+
+# ── Ticker → thematic category (shared by prompt builder and VADER fallback) ──
+
+_TICKER_CATEGORY: Dict[str, str] = {
+    "XLK":          "TECH_SEMIS",
+    "QQQM":         "TECH_SEMIS",
+    "SOXQ":         "TECH_SEMIS",
+    "ICLN":         "GREEN_ESG",
+    "USCA":         "GREEN_ESG",
+    "ESGV":         "GREEN_ESG",
+    "FLIN":         "INDIA_EM",
+    "NIFTYBEES.NS": "INDIA_EM",
+    "SPEM":         "INDIA_EM",
+    "QUAL":         "QUALITY_CORE",
+    "VTI":          "QUALITY_CORE",
+    "SPLG":         "QUALITY_CORE",
+    "SPDW":         "QUALITY_CORE",
+}
+
+
 # ── VADER fallback ────────────────────────────────────────────────────────────
 
 def _vader_fallback(
@@ -49,46 +83,92 @@ def _vader_fallback(
     all_macro_news: Dict[str, List[str]],
 ) -> Dict[str, float]:
     """
-    Regional VADER sentiment → propagated to each ETF in that region.
+    Category-aware VADER sentiment fallback (used when Gemini is unavailable).
+    Scores each category group from its thematic headlines, then maps each
+    ticker to its category. Falls back to overall average when a category
+    has no headlines.
     Returns ticker → sentiment_score (0.0 – 1.0).
     """
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
     sia = SentimentIntensityAnalyzer()
 
-    region_scores: Dict[str, float] = {}
-    for region, headlines in all_macro_news.items():
+    # Score each category and also collect an overall average
+    cat_scores: Dict[str, float] = {}
+    all_compounds: List[float] = []
+    for key, headlines in all_macro_news.items():
         if not headlines:
-            region_scores[region] = 0.50
+            cat_scores[key] = 0.50
             continue
         compounds = [sia.polarity_scores(h)["compound"] for h in headlines]
         avg = sum(compounds) / len(compounds)
-        # Normalise [-1, 1] → [0.10, 0.90]
-        region_scores[region] = round(0.10 + (avg + 1) / 2 * 0.80, 4)
+        cat_scores[key] = round(0.10 + (avg + 1) / 2 * 0.80, 4)
+        all_compounds.extend(compounds)
+
+    if all_compounds:
+        _avg = sum(all_compounds) / len(all_compounds)
+        overall = round(0.10 + (_avg + 1) / 2 * 0.80, 4)
+    else:
+        overall = 0.50
 
     scores: Dict[str, float] = {}
     for ticker in filtered_tickers:
-        if ticker.endswith(".NS") or ticker.endswith(".BO"):
-            scores[ticker] = region_scores.get("BSE", 0.50)
-        elif ticker in ("CQQQ", "KWEB", "MCHI", "FXI", "CHIQ",
-                        "GXC", "FLCH", "KURE", "CNYA", "ASHR"):
-            scores[ticker] = region_scores.get("HKCN", 0.50)
+        cat = _TICKER_CATEGORY.get(ticker)
+        if cat and cat in cat_scores:
+            scores[ticker] = cat_scores[cat]
+        elif ticker.endswith(".NS") or ticker.endswith(".BO"):
+            scores[ticker] = cat_scores.get("INDIA_EM", overall)
         else:
-            scores[ticker] = region_scores.get("INTL", 0.50)
+            scores[ticker] = overall
     return scores
 
 
 # ── Gemini prompt builder ─────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """You are a quantitative ETF signal scorer for a systematic investment system.
+_SYSTEM_PROMPT = """You are a quantitative macro strategist managing a 10-year horizon systematic portfolio.
 
-Given ETF metrics and macro news headlines, assign a sentiment score (0.0 to 1.0) to each ETF:
-  - 0.0 – 0.35 : Bearish / risk-off
-  - 0.35 – 0.65: Neutral / mixed
-  - 0.65 – 1.0 : Bullish / risk-on
+Your task: score each ETF from 0.00 to 1.00 to determine monthly capital allocation weights within its bucket.
 
-Also identify boom triggers: macro conditions that strongly boost or suppress a region.
-Examples of boom triggers: "CHINA_STIMULUS", "INDIA_GROWTH_OUTPERFORM", "EMERGING_MARKETS_RALLY",
-"US_RATE_CUT", "GLOBAL_RISK_OFF", "CHINA_TECH_CRACKDOWN".
+Scoring scale:
+  0.00 – 0.35 : Structural headwinds / risk-off — reduce satellite weight
+  0.35 – 0.65 : Neutral — standard weight allocation
+  0.65 – 1.00 : Structural tailwinds / risk-on — increase satellite weight
+
+Scoring framework — apply these rules IN ORDER:
+
+  1. STRUCTURAL TAILWINDS OVERRIDE SHORT-TERM DRAWDOWNS.
+     A 3-month price dip during a semiconductor inventory correction does NOT lower a score
+     if the 10-year AI capex cycle is intact. Do not confuse cyclical noise with secular trend reversal.
+
+  2. FORWARD P/E IS A VALUATION CEILING.
+     fwdPE > 40x for tech sectors → cap score at 0.75 regardless of news.
+     fwdPE > 30x for broad market → cap score at 0.80.
+     Low fwdPE (<15x) with positive news → score can reach 0.90+.
+
+  3. BETA AND RISK-REGIME ADJUSTMENT — SATELLITE VS CORE DISTINCTION.
+     For CORE ETFs (broad market / quality factor: VTI, SPLG, SPDW, SPEM, QUAL):
+       Beta > 1.3 in a risk-off macro environment → reduce score by 0.05–0.10.
+       Beta < 0.8 in a risk-off environment → increase score by 0.05 (defensive benefit confirmed).
+     For SATELLITE ETFs (TECH_SEMIS, GREEN_ESG, INDIA_EM: XLK, QQQM, SOXQ, ICLN, USCA, ESGV, XLY):
+       Do NOT penalize high beta during macro panics or risk-off regimes.
+       If beta > 1.3 AND sector news confirms the structural tailwind is INTACT
+       (AI capex cycle, clean energy policy, EM manufacturing rotation, etc.),
+       MAINTAIN the score or INCREASE by +0.05. High-beta Satellite ETFs at discounted
+       prices with intact structural catalysts are aggressive accumulation targets on a
+       10-year horizon — treat them accordingly.
+       Only reduce a Satellite score for beta if sector news is ALSO structurally negative
+       (policy reversal, technology obsolescence, or permanent demand destruction).
+
+  4. DIVIDEND YIELD SIGNALS QUALITY.
+     Rising dividend yield on QUAL, VTI, SPLG is a cash-flow governance signal → +0.05 to score.
+
+  5. SECTOR NEWS IS PAIRED DIRECTLY WITH EACH ETF — use it to assess real capital flows,
+     not sentiment. A headline about $40B hyperscaler capex is structural for SOXQ.
+     A subsidy announcement is structural for ICLN. Distinguish policy from noise.
+
+Identify boom triggers: macro conditions strongly boosting or suppressing a category.
+Examples: "AI_CAPEX_CYCLE", "CLEAN_ENERGY_POLICY_TAILWIND", "INDIA_FII_INFLOWS",
+"EM_SUPPLY_CHAIN_ROTATION", "US_BUYBACK_SURGE", "FED_PIVOT", "SEMICONDUCTOR_UPCYCLE",
+"ESG_REGULATORY_TIGHTENING", "INDIA_RATE_CUT", "TECH_VALUATION_COMPRESSION".
 
 Return ONLY valid JSON in exactly this format:
 {
@@ -97,14 +177,14 @@ Return ONLY valid JSON in exactly this format:
     "TICKER2": 0.45
   },
   "boom_triggers": ["TRIGGER1", "TRIGGER2"],
-  "macro_summary": "2-3 sentence macro outlook."
+  "macro_summary": "2-3 sentence 10-year horizon macro outlook."
 }
 
 Rules:
 - Every ticker in the input must appear in "scores"
 - Scores must be between 0.0 and 1.0
 - boom_triggers is an empty list [] if no notable macro conditions
-- macro_summary must be 2-3 sentences maximum
+- macro_summary must be 2-3 sentences, 10-year structural perspective only
 """
 
 
@@ -113,28 +193,54 @@ def _build_user_prompt(
     all_etf_data: Dict[str, Any],
     all_macro_news: Dict[str, List[str]],
 ) -> str:
-    lines = ["=== ETF METRICS ==="]
+    """
+    Structured per-ETF prompt block. Each entry contains:
+      - Ticker, sector category, region
+      - Hard fundamentals: fwdPE, beta, TER, 3m momentum, YTD, dividend yield
+      - Sector-specific news headlines paired inline
+
+    Pairing valuation (COST) directly with thematic news (CATALYST) lets
+    Gemini weigh them together rather than treating them as separate sections.
+    """
+    lines = [
+        "=== ETF PORTFOLIO — 10-YEAR HORIZON SCORING ===\n",
+        "For each ETF: weigh [Fundamentals] (valuation/risk anchor) against "
+        "[Sector News] (structural capital flow catalysts).\n",
+    ]
+
     for ticker in filtered_tickers:
-        rec = all_etf_data.get(ticker, {})
-        ter = rec.get("expense_ratio")
-        ter_str = f"{ter*100:.2f}%" if ter else "N/A"
-        mom3 = rec.get("momentum_3m")
-        mom3_str = f"{mom3:+.1f}%" if mom3 is not None else "N/A"
-        ytd = rec.get("ytd_return")
-        ytd_str = f"{ytd:+.1f}%" if ytd is not None else "N/A"
-        region = rec.get("region", "?")
+        rec      = all_etf_data.get(ticker, {})
+        ter      = rec.get("expense_ratio")
+        mom3     = rec.get("momentum_3m")
+        ytd      = rec.get("ytd_return")
+        fpe      = rec.get("forward_pe")
+        beta     = rec.get("beta")
+        div_yld  = rec.get("dividend_yield")
+        category = rec.get("category", "?")
+        region   = rec.get("region", "?")
+
+        ter_str  = f"{ter*100:.2f}%"     if ter     is not None else "N/A"
+        mom3_str = f"{mom3:+.1f}%"      if mom3    is not None else "N/A"
+        ytd_str  = f"{ytd:+.1f}%"       if ytd     is not None else "N/A"
+        fpe_str  = f"{fpe:.1f}x"        if fpe     is not None else "N/A"
+        beta_str = f"{beta:.2f}"        if beta    is not None else "N/A"
+        div_str  = f"{div_yld*100:.2f}%" if div_yld is not None else "N/A"
+
+        # Pair inline sector news for this ticker's thematic category
+        theme     = _TICKER_CATEGORY.get(ticker, "QUALITY_CORE")
+        headlines = all_macro_news.get(theme, [])
+
+        lines.append(f"[ETF: {ticker}] {category} | region={region}")
         lines.append(
-            f"{ticker:<22} region={region}  TER={ter_str}  "
-            f"3m={mom3_str}  YTD={ytd_str}"
+            f"  [Fundamentals] fwdPE={fpe_str}  beta={beta_str}  TER={ter_str}"
+            f"  3m={mom3_str}  YTD={ytd_str}  divYield={div_str}"
         )
+        lines.append(f"  [Sector News — {theme}]")
+        for h in (headlines[:4] if headlines else ["(no headlines available)"]):
+            lines.append(f"    • {h}")
+        lines.append("")   # blank line between ETFs
 
-    lines.append("\n=== MACRO NEWS HEADLINES ===")
-    for region, headlines in all_macro_news.items():
-        lines.append(f"\n[{region}]")
-        for h in headlines[:8]:   # cap at 8 headlines per region
-            lines.append(f"  • {h}")
-
-    lines.append(f"\n=== TICKERS TO SCORE ===")
+    lines.append("=== TICKERS TO SCORE ===")
     lines.append(", ".join(filtered_tickers))
 
     return "\n".join(lines)
@@ -142,26 +248,43 @@ def _build_user_prompt(
 
 # ── Extracted scorer — callable from both node and backtest ───────────────────
 
+_RETRY_DELAYS = (15, 30, 60)   # seconds between consecutive 429 retries
+
+
 def score_etfs(
     filtered_tickers: List[str],
     all_etf_data: Dict[str, Any],
     all_macro_news: Dict[str, List[str]],
     reference_date: Optional[_Date] = None,
-) -> Tuple[Dict[str, float], List[str], str]:
+    _force_vader: bool = False,
+) -> Tuple[Dict[str, float], List[str], str, str]:
     """
     Score ETF sentiment via Gemini (with optional date isolation) or VADER.
 
     Args:
         filtered_tickers: Tickers to score.
         all_etf_data:     ETF metrics dict (from regional_researcher output).
-        all_macro_news:   Headlines per region (from regional_researcher output).
+        all_macro_news:   Headlines per category (from regional_researcher output).
         reference_date:   None → production (no date constraint in prompt).
                           date → backtest (Gemini instructed to evaluate as-of that date).
+        _force_vader:     True → skip Gemini entirely; use VADER for all tickers.
+                          Useful for backtest speed runs or when GEMINI_API_KEY is absent.
 
     Returns:
-        (sentiment_scores, boom_triggers, macro_summary)
+        (sentiment_scores, boom_triggers, macro_summary, scorer_source)
+        scorer_source is "gemini" or "vader".
     """
-    # Build system prompt — inject date header for backtest mode
+    date_tag = f" [as-of {reference_date}]" if reference_date else ""
+
+    # ── VADER-only mode (backtest escape hatch — zero Gemini calls) ───────────
+    if _force_vader:
+        sentiment_scores = _vader_fallback(filtered_tickers, all_macro_news)
+        macro_summary    = "Macro scores computed via VADER sentiment (LLM disabled)."
+        boom_triggers: List[str] = []
+        print(f"  [scorer] Scores via VADER (forced){date_tag}")
+        return sentiment_scores, boom_triggers, macro_summary, "vader"
+
+    # ── Build system prompt — inject date header for backtest mode ────────────
     if reference_date:
         month_year  = reference_date.strftime("%B %Y")
         iso         = reference_date.isoformat()
@@ -174,49 +297,65 @@ def score_etfs(
     else:
         system_prompt = _SYSTEM_PROMPT
 
-    sentiment_scores: Dict[str, float] = {}
-    boom_triggers: List[str] = []
-    macro_summary = ""
+    sentiment_scores_: Dict[str, float] = {}
+    boom_triggers_: List[str] = []
+    macro_summary_ = ""
     used_fallback = False
 
-    try:
-        model = _get_gemini_model()
-        user_content = _build_user_prompt(filtered_tickers, all_etf_data, all_macro_news)
-        full_prompt  = system_prompt + "\n\n" + user_content
+    # ── Gemini call with exponential backoff on 429 ───────────────────────────
+    for _attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            model        = _get_gemini_model()
+            user_content = _build_user_prompt(filtered_tickers, all_etf_data, all_macro_news)
+            full_prompt  = system_prompt + "\n\n" + user_content
 
-        response = model.generate_content(full_prompt)
-        parsed   = _parse_json(response.text)
+            response = model.generate_content(full_prompt)
+            parsed   = _parse_json(response.text)
 
-        raw_scores = parsed.get("scores", {})
-        for ticker in filtered_tickers:
-            val = raw_scores.get(ticker)
-            sentiment_scores[ticker] = (
-                max(0.0, min(1.0, float(val))) if val is not None else 0.50
-            )
+            raw_scores = parsed.get("scores", {})
+            for ticker in filtered_tickers:
+                val = raw_scores.get(ticker)
+                sentiment_scores_[ticker] = (
+                    max(0.0, min(1.0, float(val))) if val is not None else 0.50
+                )
 
-        boom_triggers = parsed.get("boom_triggers", [])
-        macro_summary = parsed.get("macro_summary", "")
+            boom_triggers_ = parsed.get("boom_triggers", [])
+            macro_summary_ = parsed.get("macro_summary", "")
+            break   # success — exit retry loop
 
-    except EnvironmentError as exc:
-        print(f"  [scorer] ⚠  {exc} — falling back to VADER")
-        used_fallback = True
-    except Exception as exc:
-        print(f"  [scorer] ⚠  Gemini error: {exc} — falling back to VADER")
-        used_fallback = True
+        except EnvironmentError as exc:
+            print(f"  [scorer] ⚠  {exc} — falling back to VADER")
+            used_fallback = True
+            break
+
+        except Exception as exc:
+            if _is_rate_limit_error(exc) and _attempt < len(_RETRY_DELAYS):
+                delay = _RETRY_DELAYS[_attempt]
+                print(
+                    f"  [scorer] ⚠  Gemini 429 rate limit — "
+                    f"retrying in {delay}s "
+                    f"(attempt {_attempt + 1}/{len(_RETRY_DELAYS) + 1}) …"
+                )
+                time.sleep(delay)
+            else:
+                msg = "429 max retries exhausted" if _is_rate_limit_error(exc) else str(exc)
+                print(f"  [scorer] ⚠  Gemini error: {msg} — falling back to VADER")
+                used_fallback = True
+                break
 
     if used_fallback:
-        sentiment_scores = _vader_fallback(filtered_tickers, all_macro_news)
-        macro_summary    = "Macro scores computed via VADER sentiment (Gemini unavailable)."
-        boom_triggers    = []
+        sentiment_scores_ = _vader_fallback(filtered_tickers, all_macro_news)
+        macro_summary_     = "Macro scores computed via VADER sentiment (Gemini unavailable)."
+        boom_triggers_     = []
 
-    source = "VADER fallback" if used_fallback else "Gemini"
-    date_tag = f" [as-of {reference_date}]" if reference_date else ""
+    scorer_source = "vader" if used_fallback else "gemini"
+    source        = "VADER fallback" if used_fallback else "Gemini"
     print(f"  [scorer] Scores via {source}{date_tag}")
-    if boom_triggers:
-        print(f"  [scorer] Boom triggers: {', '.join(boom_triggers)}")
-    print(f"  [scorer] Macro: {macro_summary[:120]}")
+    if boom_triggers_:
+        print(f"  [scorer] Boom triggers: {', '.join(boom_triggers_)}")
+    print(f"  [scorer] Macro: {macro_summary_[:120]}")
 
-    return sentiment_scores, boom_triggers, macro_summary
+    return sentiment_scores_, boom_triggers_, macro_summary_, scorer_source
 
 
 # ── Node function (thin wrapper around score_etfs) ────────────────────────────
@@ -233,7 +372,7 @@ def signal_scorer_node(state: SIPExecutionState) -> dict:
 
     print(f"\n[Node 2] Signal Scorer — scoring {len(filtered_tickers)} ETFs …")
 
-    sentiment_scores, boom_triggers, macro_summary = score_etfs(
+    sentiment_scores, boom_triggers, macro_summary, _ = score_etfs(
         filtered_tickers = filtered_tickers,
         all_etf_data     = all_etf_data,
         all_macro_news   = all_macro_news,

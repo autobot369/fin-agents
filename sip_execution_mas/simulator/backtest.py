@@ -274,17 +274,20 @@ def _fixed_bucket_alloc(
     sentiment_scores: dict,
     expense_scores: dict,
     macro_summary: str,
+    core_pct: float = 0.70,
 ) -> List[dict]:
     """
-    Fixed 70/30 Core/Satellite allocation using pseudo-Sharpe consensus scores.
-    All 14 locked tickers always receive a position — none are dropped.
+    Fixed Core/Satellite allocation using pseudo-Sharpe consensus scores.
+    core_pct controls the split (e.g. 0.70 = 70% core / 30% satellite).
+    All 12 locked tickers always receive a position — none are dropped.
     """
     from sip_execution_mas.agents.regional_researcher import (
         _CORE_UNIVERSE_TICKERS, _SATELLITE_UNIVERSE_TICKERS,
     )
 
-    core_budget      = round(sip_amount * 0.70, 2)
-    satellite_budget = round(sip_amount * 0.30, 2)
+    satellite_pct    = round(1.0 - core_pct, 10)
+    core_budget      = round(sip_amount * core_pct, 2)
+    satellite_budget = round(sip_amount * satellite_pct, 2)
 
     def _alloc_bucket(bucket_tickers, budget, bucket_name):
         total = sum(max(consensus_scores.get(t, 0.01), 0.01) for t in bucket_tickers) or 1.0
@@ -331,22 +334,23 @@ def run_historical_backtest(
     day_of_month: int = 1,
     ter_threshold: float = 0.007,       # decimal — used in expense_score formula
     usd_inr_rate: float = 83.50,
+    core_pct: float = 0.70,             # core bucket share (0.50–0.90)
     progress_callback=None,
     gemini_ratelimit_delay: float = 5.0,
     use_llm: bool = True,
 ) -> HistoricalBacktestResult:
     """
-    Month-by-month historical SIP backtest with locked 14-ETF universe.
+    Month-by-month historical SIP backtest with locked 12-ETF universe.
 
     For each calendar month in [start_date, end_date):
-      1. Uses the locked 14-ETF universe (no discovery — same tickers every month).
+      1. Uses the locked 12-ETF universe (no discovery — same tickers every month).
       2. yfinance fetches metrics bounded to as_of_date.
       3. News is filtered to articles published on or before as_of_date.
       4. Gemini (or VADER fallback) scores sentiment for that date only.
          Sentiment rotates satellite weights — core weights are stable.
       5. Crash-Accumulator VA: if panic + negative momentum, effective SIP
          scales by 1.20× (Tier 1) or 1.50× (Tier 2) — mirrors Node 4 logic.
-      6. Fixed 70/30 bucket allocation using effective_sip.
+      6. Fixed core_pct/satellite bucket allocation using effective_sip.
       7. Hard rules 1/2/3/5 validated (no duplicate-month check in backtest).
       8. Units are bought at the historical price for that month.
 
@@ -389,7 +393,7 @@ def run_historical_backtest(
         len(month_list), start_date.isoformat(), end_date.isoformat(),
     ))
 
-    # Pre-seed the price cache with all 14 locked tickers
+    # Pre-seed the price cache with all 12 locked tickers
     buf_start      = start_date - timedelta(days=10)
     locked_tickers = [r["ticker"] for r in _LOCKED_UNIVERSE]
     _log("[backtest] Pre-fetching price history for {} locked ETFs …".format(len(locked_tickers)))
@@ -420,7 +424,7 @@ def run_historical_backtest(
         ))
 
         try:
-            # ── Phase 1: Build ETFRecord for all 14 locked ETFs ──────────────
+            # ── Phase 1: Build ETFRecord for all 12 locked ETFs ──────────────
             raw        = _fetch_yfinance_batch(locked_tickers, as_of_date=buy_date)
             macro_news = _fetch_news(as_of_date=buy_date)
 
@@ -521,7 +525,7 @@ def run_historical_backtest(
                     f"(×{va_mult:.2f})  |  {va_reason}"
                 )
 
-            # ── Phase 4: Fixed 70/30 bucket allocation (using effective SIP) ──
+            # ── Phase 4: Fixed bucket allocation (using effective SIP) ──────
             allocs = _fixed_bucket_alloc(
                 tickers          = filtered_tickers,
                 consensus_scores = consensus_scores,
@@ -530,6 +534,7 @@ def run_historical_backtest(
                 sentiment_scores = sentiment_scores,
                 expense_scores   = expense_scores,
                 macro_summary    = macro_summary,
+                core_pct         = core_pct,
             )
 
             # ── Phase 4b: Hard rule validation (Rules 1/2/3/5 — no Rule 4) ───
@@ -619,8 +624,8 @@ def run_historical_backtest(
             date                = buy_date.isoformat(),
             sip_amount          = sip_amount,
             effective_sip       = effective_sip,
-            core_budget         = round(effective_sip * 0.70, 2),
-            satellite_budget    = round(effective_sip * 0.30, 2),
+            core_budget         = round(effective_sip * core_pct, 2),
+            satellite_budget    = round(effective_sip * (1.0 - core_pct), 2),
             total_invested_usd  = round(month_usd, 2),
             positions           = positions,
             boom_triggers       = boom_triggers,
@@ -695,6 +700,7 @@ def run_historical_backtest(
         end_date           = end_date.isoformat(),
         months_run         = len(monthly_entries),
         sip_amount         = sip_amount,
+        core_pct           = core_pct,
         total_invested_usd = round(total_invested_usd, 2),
         current_value_usd  = round(current_value_usd, 2),
         total_pnl_usd      = round(total_pnl, 2),

@@ -275,6 +275,13 @@ with st.sidebar:
             value=500.0, step=50.0,
             key="sb_bt_sip",
         )
+        bt_core_pct = st.slider(
+            "Core / Satellite split",
+            min_value=50, max_value=90, value=70, step=5,
+            format="%d%% core",
+            help="Percentage of SIP allocated to core ETFs; remainder goes to satellite.",
+            key="sb_bt_core_pct",
+        )
 
         run_bt = st.button("▶ Run Backtest", type="primary", use_container_width=True)
 
@@ -283,10 +290,11 @@ with st.sidebar:
                 st.error("Start must be before end date.")
             else:
                 st.session_state["bt_running"] = {
-                    "start": bt_start,
-                    "end":   bt_end,
-                    "day":   int(bt_day),
-                    "sip":   bt_sip,
+                    "start":    bt_start,
+                    "end":      bt_end,
+                    "day":      int(bt_day),
+                    "sip":      bt_sip,
+                    "core_pct": bt_core_pct / 100.0,
                 }
 
     st.divider()
@@ -393,6 +401,7 @@ if st.session_state.get("bt_mode"):
                     end_date          = _params["end"],
                     sip_amount        = _params["sip"],
                     day_of_month      = _params["day"],
+                    core_pct          = _params.get("core_pct", 0.70),
                     progress_callback = _bt_progress,
                 )
                 st.session_state["backtest_result"] = _bt_result
@@ -410,10 +419,13 @@ if st.session_state.get("bt_mode"):
 
         st.divider()
         st.header("🔬 Backtest Results")
+        _core_pct_used  = int(round(r.get("core_pct", 0.70) * 100))
+        _sat_pct_used   = 100 - _core_pct_used
         st.caption(
             "Period: **{}** → **{}**  ·  {} months  ·  "
-            "SIP ${:.0f}/month  ·  buy-only  ·  no future data leakage".format(
+            "SIP ${:.0f}/month  ·  Core/Sat {}%/{}%  ·  buy-only  ·  no future data leakage".format(
                 r["start_date"], r["end_date"], r["months_run"], r["sip_amount"],
+                _core_pct_used, _sat_pct_used,
             )
         )
 
@@ -487,10 +499,10 @@ if st.session_state.get("bt_mode"):
                 fillcolor="rgba(76,155,232,0.12)",
                 hovertemplate="<b>%{x}</b><br>Value: $%{y:,.2f}<extra></extra>",
             ))
-            # Benchmark lines: 100% SPLG and 100% NIFTYBEES.NS
+            # Benchmark lines: 100% USCA (US core anchor) and 100% NIFTYBEES.NS
             _bench_specs = [
-                ("SPLG",          "100% SPLG (S&P 500)",  "#9B59B6"),
-                ("NIFTYBEES.NS",  "100% NIFTY (India)",   "#E67E22"),
+                ("USCA",          "100% USCA (US Large-Cap)", "#9B59B6"),
+                ("NIFTYBEES.NS",  "100% NIFTY (India)",       "#E67E22"),
             ]
             for _bt_ticker, _bt_label, _bt_color in _bench_specs:
                 _bt_units = 0.0

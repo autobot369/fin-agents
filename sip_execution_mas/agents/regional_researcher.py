@@ -1,11 +1,11 @@
 """
 Node 1 — Regional Alpha & Cost Orchestrator
 =============================================
-Uses a locked 14-ETF universe split into two permanent buckets.
-Universe discovery has been removed — the 14 tickers never change.
+Uses a locked 12-ETF universe split into two permanent buckets.
+Universe discovery has been removed — the 12 tickers never change.
 
 Node 1 responsibilities:
-  1. Build ETFRecord for all 14 locked tickers via yfinance.
+  1. Build ETFRecord for all 12 locked tickers via yfinance.
   2. Fetch recent macro news (DuckDuckGo + yfinance.news) for Node 2
      (signal_scorer). News drives satellite weight rotation — it is the
      only variable input per month.
@@ -42,26 +42,27 @@ _BROKERAGE_MIN: Dict[str, float] = {
 _TRADE_SIZE  = 500.0        # Reference trade size in USD
 
 
-# ── Locked universe (14 ETFs, v2) ────────────────────────────────────────────
+# ── Locked universe (12 ETFs, v3) ────────────────────────────────────────────
+# Core (5): Broad-market anchors — low-cost beta + India strategic overweight
+# Satellite (7): Thematic growth — semis, tech, small-cap value, uranium,
+#                cybersecurity, India small-cap, biotech
 
 _CORE_UNIVERSE: List[Dict[str, Any]] = [
-    {"ticker": "VTI",          "name": "Vanguard Total Stock Market ETF",          "ter_pct": 0.03, "category": "broad_market",    "market": "NASDAQ", "region": "US"},
-    {"ticker": "SPLG",         "name": "SPDR Portfolio S&P 500 ETF",               "ter_pct": 0.02, "category": "broad_market",    "market": "NYSE",   "region": "US"},
-    {"ticker": "SPDW",         "name": "SPDR Portfolio Developed World ex-US ETF", "ter_pct": 0.04, "category": "broad_market",    "market": "NYSE",   "region": "US"},
-    {"ticker": "SPEM",         "name": "SPDR Portfolio Emerging Markets ETF",      "ter_pct": 0.07, "category": "emerging_markets","market": "NYSE",   "region": "US"},
-    {"ticker": "FLIN",         "name": "Franklin FTSE India ETF",                  "ter_pct": 0.19, "category": "india",           "market": "NYSE",   "region": "US"},
-    {"ticker": "NIFTYBEES.NS", "name": "Nippon India ETF Nifty 50 BeES",           "ter_pct": 0.04, "category": "india",           "market": "NSE",    "region": "BSE"},
-    {"ticker": "QUAL",         "name": "iShares MSCI USA Quality Factor ETF",      "ter_pct": 0.15, "category": "quality_factor",  "market": "NASDAQ", "region": "US"},
+    {"ticker": "USCA",         "name": "BNY Mellon US Large Cap Core Equity ETF",  "ter_pct": 0.07, "category": "broad_market",       "market": "NYSE",   "region": "US"},
+    {"ticker": "SPDW",         "name": "SPDR Portfolio Developed World ex-US ETF", "ter_pct": 0.04, "category": "developed_markets",   "market": "NYSE",   "region": "US"},
+    {"ticker": "SPEM",         "name": "SPDR Portfolio Emerging Markets ETF",      "ter_pct": 0.07, "category": "emerging_markets",    "market": "NYSE",   "region": "US"},
+    {"ticker": "FLIN",         "name": "Franklin FTSE India ETF",                  "ter_pct": 0.19, "category": "india",               "market": "NYSE",   "region": "US"},
+    {"ticker": "NIFTYBEES.NS", "name": "Nippon India ETF Nifty 50 BeES",           "ter_pct": 0.04, "category": "india",               "market": "NSE",    "region": "BSE"},
 ]
 
 _SATELLITE_UNIVERSE: List[Dict[str, Any]] = [
-    {"ticker": "XLK",  "name": "Technology Select Sector SPDR Fund",      "ter_pct": 0.10, "category": "technology",    "market": "NYSE",   "region": "US"},
-    {"ticker": "QQQM", "name": "Invesco NASDAQ 100 ETF",                  "ter_pct": 0.15, "category": "technology",    "market": "NASDAQ", "region": "US"},
-    {"ticker": "SOXQ", "name": "Invesco PHLX Semiconductor ETF",          "ter_pct": 0.19, "category": "semiconductors","market": "NASDAQ", "region": "US"},
-    {"ticker": "ICLN", "name": "iShares Global Clean Energy ETF",         "ter_pct": 0.42, "category": "clean_energy",  "market": "NASDAQ", "region": "US"},
-    {"ticker": "USCA", "name": "Xtrackers MSCI USA ESG Leaders ETF",      "ter_pct": 0.10, "category": "esg",           "market": "NASDAQ", "region": "US"},
-    {"ticker": "ESGV", "name": "Vanguard ESG US Stock ETF",               "ter_pct": 0.09, "category": "esg",           "market": "NASDAQ", "region": "US"},
-    {"ticker": "XLY",  "name": "Consumer Discr Select Sector SPDR Fund",  "ter_pct": 0.10, "category": "consumer",      "market": "NYSE",   "region": "US"},
+    {"ticker": "SOXQ", "name": "Invesco PHLX Semiconductor ETF",              "ter_pct": 0.19, "category": "semiconductors",  "market": "NASDAQ", "region": "US"},
+    {"ticker": "XLK",  "name": "Technology Select Sector SPDR Fund",          "ter_pct": 0.10, "category": "technology",      "market": "NYSE",   "region": "US"},
+    {"ticker": "AVUV", "name": "Avantis U.S. Small Cap Value ETF",             "ter_pct": 0.25, "category": "small_cap_value", "market": "NYSE",   "region": "US"},
+    {"ticker": "URNM", "name": "Sprott Uranium Miners ETF",                    "ter_pct": 0.83, "category": "uranium_energy",  "market": "NYSE",   "region": "US"},
+    {"ticker": "CIBR", "name": "First Trust NASDAQ Cybersecurity ETF",         "ter_pct": 0.60, "category": "cybersecurity",   "market": "NASDAQ", "region": "US"},
+    {"ticker": "SMIN", "name": "iShares MSCI India Small-Cap ETF",             "ter_pct": 0.74, "category": "india_small_cap", "market": "NYSE",   "region": "US"},
+    {"ticker": "XBI",  "name": "SPDR S&P Biotech ETF",                         "ter_pct": 0.35, "category": "biotech",         "market": "NYSE",   "region": "US"},
 ]
 
 _LOCKED_UNIVERSE            = _CORE_UNIVERSE + _SATELLITE_UNIVERSE
@@ -75,38 +76,41 @@ _SATELLITE_UNIVERSE_TICKERS = frozenset(r["ticker"] for r in _SATELLITE_UNIVERSE
 
 _CATEGORY_QUERIES: Dict[str, List[str]] = {
     "TECH_SEMIS": [
-        "hyperscaler data center capex AI infrastructure deployment 2026",
-        "TSMC semiconductor supply chain AI chip demand NASDAQ",
-    ],
-    "GREEN_ESG": [
-        "global carbon pricing clean energy subsidies ESG policy 2026",
-        "renewable energy investment ESG regulatory shifts climate finance",
+        "hyperscaler data center capex AI infrastructure semiconductor demand 2026",
+        "TSMC chip supply chain NVIDIA AI accelerator NASDAQ cybersecurity spending",
     ],
     "INDIA_EM": [
         "FII foreign institutional investor flows India NSE RBI monetary policy 2026",
-        "emerging market supply chain relocation India trade manufacturing",
+        "emerging market supply chain relocation India trade manufacturing small-cap",
+    ],
+    "URANIUM_ENERGY": [
+        "uranium spot price nuclear energy AI data center power demand 2026",
+        "Sprott uranium miners energy transition nuclear reactor capacity",
+    ],
+    "BIOTECH": [
+        "FDA drug approval biotech GLP-1 weight loss RNA therapy 2026",
+        "biotech M&A pipeline equal-weight XBI rate sensitivity innovation",
     ],
     "QUALITY_CORE": [
-        "S&P 500 share buyback corporate balance sheet health 2026",
-        "US equity broad market quality factor Federal Reserve outlook",
+        "US large-cap equity broad market Federal Reserve outlook 2026",
+        "developed world international equities Europe Japan dividend growth",
     ],
 }
 
 # Ticker → thematic category (drives targeted DDGS queries and VADER grouping)
 _TICKER_CATEGORY: Dict[str, str] = {
-    "XLK":          "TECH_SEMIS",
-    "QQQM":         "TECH_SEMIS",
     "SOXQ":         "TECH_SEMIS",
-    "ICLN":         "GREEN_ESG",
-    "USCA":         "GREEN_ESG",
-    "ESGV":         "GREEN_ESG",
+    "XLK":          "TECH_SEMIS",
+    "CIBR":         "TECH_SEMIS",
     "FLIN":         "INDIA_EM",
     "NIFTYBEES.NS": "INDIA_EM",
     "SPEM":         "INDIA_EM",
-    "QUAL":         "QUALITY_CORE",
-    "VTI":          "QUALITY_CORE",
-    "SPLG":         "QUALITY_CORE",
+    "SMIN":         "INDIA_EM",
+    "URNM":         "URANIUM_ENERGY",
+    "XBI":          "BIOTECH",
+    "USCA":         "QUALITY_CORE",
     "SPDW":         "QUALITY_CORE",
+    "AVUV":         "QUALITY_CORE",
 }
 
 
@@ -295,8 +299,8 @@ def regional_researcher_node(state: SIPExecutionState) -> dict:
     """
     Node 1 — Regional Alpha & Cost Orchestrator
 
-    Always uses the locked 14-ETF universe — no discovery calls.
-    Fetches yfinance metrics and macro news for all 14 tickers.
+    Always uses the locked 12-ETF universe — no discovery calls.
+    Fetches yfinance metrics and macro news for all 12 tickers.
     News feeds Node 2 (signal_scorer) which rotates satellite weights.
 
     Production (as_of_date=None): live yfinance data, latest news.
@@ -305,7 +309,7 @@ def regional_researcher_node(state: SIPExecutionState) -> dict:
     as_of_date = state.get("as_of_date")   # None in production
 
     suffix = f" [as-of {as_of_date}]" if as_of_date else ""
-    print(f"\n[Node 1] Building locked 14-ETF universe{suffix} …")
+    print(f"\n[Node 1] Building locked 12-ETF universe{suffix} …")
 
     all_tickers = [r["ticker"] for r in _LOCKED_UNIVERSE]
 
@@ -377,7 +381,7 @@ def regional_researcher_node(state: SIPExecutionState) -> dict:
                 "proxy_for":              None,
             }
             etf_data[ticker] = record
-            filtered.append(ticker)   # all 14 always pass
+            filtered.append(ticker)   # all 12 always pass
 
     print(f"[Node 1] {len(filtered)} ETFs ready "
           f"({len(_CORE_UNIVERSE_TICKERS)} core + {len(_SATELLITE_UNIVERSE_TICKERS)} satellite)")

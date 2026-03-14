@@ -4,7 +4,7 @@
 
 ## Purpose
 
-A **6-node LangGraph execution loop** that invests a fixed 14-ETF universe each month using Gemini for sentiment scoring and allocation weighting, audits the portfolio against hard risk rules, executes orders (paper or live), and persists every trade to a shared ledger. It is a **decision + execution system** — unlike `etf-selection-mas`, it can move money.
+A **6-node LangGraph execution loop** that invests a fixed 12-ETF universe each month using Gemini for sentiment scoring and allocation weighting, audits the portfolio against hard risk rules, executes orders (paper or live), and persists every trade to a shared ledger. It is a **decision + execution system** — unlike `etf-selection-mas`, it can move money.
 
 ---
 
@@ -64,35 +64,33 @@ researcher → scorer → optimizer → auditor
 
 ---
 
-## ETF Universe — Locked v2 (14 ETFs in 2 Permanent Buckets)
+## ETF Universe — Locked v3 (12 ETFs in 2 Permanent Buckets)
 
-The production universe is fixed — Gemini never changes *which* ETFs are held. Gemini sentiment only determines *how much* capital each satellite ETF receives within its 30% budget.
+The production universe is fixed — Gemini never changes *which* ETFs are held. Gemini sentiment only determines *how much* capital each satellite ETF receives within its satellite budget.
 
-### Core Bucket — 70% of SIP (always all 7)
+### Core Bucket — 70% of SIP (always all 5, equal-weight by consensus score)
 
-| Ticker | Name | TER | Category |
-|--------|------|-----|----------|
-| VTI | Vanguard Total Stock Market ETF | 0.03% | US Total Market |
-| SPLG | SPDR Portfolio S&P 500 ETF | 0.02% | US Large-Cap |
-| SPDW | SPDR Portfolio Developed World ex-US ETF | 0.04% | Developed ex-US |
-| SPEM | SPDR Portfolio Emerging Markets ETF | 0.07% | Emerging Markets |
-| FLIN | Franklin FTSE India ETF | 0.19% | India (US-listed) |
-| NIFTYBEES.NS | Nippon India ETF Nifty 50 BeES | 0.04% | India (NSE) |
-| QUAL | iShares MSCI USA Quality Factor ETF | 0.15% | US Quality Factor |
+| Ticker | Name | TER | Theme |
+|--------|------|-----|-------|
+| USCA | BNY Mellon US Large Cap Core Equity ETF | 0.07% | US Large-Cap / Climate Action Anchor |
+| SPDW | SPDR Portfolio Developed World ex-US ETF | 0.04% | Developed World ex-U.S. (Europe / Japan) |
+| SPEM | SPDR Portfolio Emerging Markets ETF | 0.07% | Broad Emerging Markets |
+| FLIN | Franklin FTSE India ETF | 0.19% | India Large-Cap (US-listed) |
+| NIFTYBEES.NS | Nippon India ETF Nifty 50 BeES | 0.04% | India Large-Cap (NSE direct) |
 
 ### Satellite Bucket — 30% of SIP (always all 7, sentiment-weighted)
 
-| Ticker | Name | TER | Category |
-|--------|------|-----|----------|
-| XLK | Technology Select Sector SPDR Fund | 0.10% | Technology |
-| QQQM | Invesco NASDAQ 100 ETF | 0.15% | NASDAQ-100 |
-| SOXQ | Invesco PHLX Semiconductor ETF | 0.19% | Semiconductors |
-| ICLN | iShares Global Clean Energy ETF | 0.42% | Clean Energy |
-| USCA | Xtrackers MSCI USA ESG Leaders ETF | 0.10% | ESG Leaders |
-| ESGV | Vanguard ESG US Stock ETF | 0.09% | ESG Broad |
-| XLY | Consumer Discretionary Select Sector SPDR Fund | 0.10% | Consumer |
+| Ticker | Name | TER | Theme |
+|--------|------|-----|-------|
+| SOXQ | Invesco PHLX Semiconductor ETF | 0.19% | Hardware Supercycle (AI Semis) |
+| XLK | Technology Select Sector SPDR Fund | 0.10% | Broad Tech & Software Infrastructure |
+| AVUV | Avantis U.S. Small Cap Value ETF | 0.25% | U.S. Small-Cap Value (VTI Replacement) |
+| URNM | Sprott Uranium Miners ETF | 0.83% | Uranium / AI Energy Infrastructure |
+| CIBR | First Trust NASDAQ Cybersecurity ETF | 0.60% | Cybersecurity |
+| SMIN | iShares MSCI India Small-Cap ETF | 0.74% | India Small-Cap / Domestic Consumption |
+| XBI | SPDR S&P Biotech ETF | 0.35% | Equal-Weight Biotech (Rate-Sensitive Innovation) |
 
-> **Backtest mode** (`as_of_date` set): Node 1 still uses the same locked 14-ETF universe — no Gemini discovery in any mode. yfinance is date-bounded to the backtest month, DDGS headlines are filtered to that date, and `_fixed_bucket_alloc()` applies the same 70/30 split as production.
+> **Backtest mode** (`as_of_date` set): Node 1 still uses the same locked 12-ETF universe — no Gemini discovery in any mode. yfinance is date-bounded to the backtest month, DDGS headlines are filtered to that date, and `_fixed_bucket_alloc()` applies the configured core_pct split (default 70/30) as production.
 
 ---
 
@@ -100,7 +98,7 @@ The production universe is fixed — Gemini never changes *which* ETFs are held.
 
 ### Node 1 — Regional Researcher (`agents/regional_researcher.py`)
 
-**Both production and backtest** use the identical locked 14-ETF universe (`_LOCKED_UNIVERSE`). No Gemini calls in Node 1 under any circumstance. In backtest mode (`as_of_date` set), yfinance history is date-bounded and DDGS queries apply a `timelimit` filter — but universe selection never changes.
+**Both production and backtest** use the identical locked 12-ETF universe (`_LOCKED_UNIVERSE`). No Gemini calls in Node 1 under any circumstance. In backtest mode (`as_of_date` set), yfinance history is date-bounded and DDGS queries apply a `timelimit` filter — but universe selection never changes.
 
 **yfinance enrichment:**
 - 1-year price history: `current_price`, `momentum_3m` (63 bars), `momentum_1m` (21 bars), `ytd_return`
@@ -110,27 +108,27 @@ The production universe is fixed — Gemini never changes *which* ETFs are held.
 - **`beta`**: from `info["beta"]` — regime scaling input
 - **`dividend_yield`**: from `info["dividendYield"]` or `info["trailingAnnualDividendYield"]` — quality signal
 
-**News fetch (DDGS) — 4 thematic categories, 2 queries each:**
+**News fetch (DDGS) — 5 thematic categories, 2 queries each:**
 
 | Category | What it captures |
 |----------|-----------------|
-| `TECH_SEMIS` | AI capex cycles, hyperscaler data-center spending, semiconductor supply chain |
-| `GREEN_ESG` | Carbon pricing, clean-energy subsidies, ESG regulatory shifts |
-| `INDIA_EM` | FII flows, RBI policy, emerging-market manufacturing rotation |
-| `QUALITY_CORE` | S&P 500 buybacks, corporate balance-sheet quality, Fed outlook |
+| `TECH_SEMIS` | AI capex cycles, hyperscaler data-center spending, semiconductor & cybersecurity demand |
+| `INDIA_EM` | FII flows, RBI policy, emerging-market manufacturing rotation, India small-cap |
+| `URANIUM_ENERGY` | Uranium spot price, nuclear energy demand from AI data centers, energy transition |
+| `BIOTECH` | FDA approvals, GLP-1/RNA pipeline, biotech M&A, rate sensitivity |
+| `QUALITY_CORE` | US large-cap breadth, developed-world international equities, Fed outlook |
 
-Returns `all_macro_news` as `{"TECH_SEMIS": [...], "GREEN_ESG": [...], "INDIA_EM": [...], "QUALITY_CORE": [...]}`.
+Returns `all_macro_news` as `{"TECH_SEMIS": [...], "INDIA_EM": [...], "URANIUM_ENERGY": [...], "BIOTECH": [...], "QUALITY_CORE": [...]}`.
 
 **Ticker → Category mapping (`_TICKER_CATEGORY`):**
 
 | Ticker | Category |
 |--------|----------|
-| XLK, QQQM, SOXQ | TECH_SEMIS |
-| ICLN, USCA, ESGV | GREEN_ESG |
-| FLIN, NIFTYBEES.NS, SPEM | INDIA_EM |
-| QUAL, VTI, SPLG, SPDW | QUALITY_CORE |
-
-(XLY falls back to QUALITY_CORE in the scorer if not explicitly mapped.)
+| SOXQ, XLK, CIBR | TECH_SEMIS |
+| FLIN, NIFTYBEES.NS, SPEM, SMIN | INDIA_EM |
+| URNM | URANIUM_ENERGY |
+| XBI | BIOTECH |
+| USCA, SPDW, AVUV | QUALITY_CORE |
 
 **Reads:** `ter_threshold`, `as_of_date`
 **Writes:** `all_etf_data`, `all_macro_news`, `filtered_tickers`
@@ -145,7 +143,7 @@ Returns `all_macro_news` as `{"TECH_SEMIS": [...], "GREEN_ESG": [...], "INDIA_EM
 
 1. **Structural tailwinds override short-term drawdowns** — a 3-month price dip during a semiconductor inventory cycle does NOT lower a score if the AI capex cycle is intact.
 2. **Forward P/E is a valuation ceiling** — fwdPE > 40x tech → cap at 0.75; fwdPE > 30x broad → cap at 0.80; fwdPE < 15x with positive news → can reach 0.90+.
-3. **Beta/risk-regime adjustment — satellite vs core distinction** — CORE ETFs (VTI, SPLG, SPDW, SPEM, QUAL): beta > 1.3 risk-off → −0.05–0.10; beta < 0.8 → +0.05. SATELLITE ETFs (XLK, QQQM, SOXQ, ICLN, USCA, ESGV, XLY): do NOT penalize high beta during panics; if structural tailwind intact, maintain or +0.05; only reduce if sector news is also structurally negative.
+3. **Beta/risk-regime adjustment — satellite vs core distinction** — CORE ETFs (USCA, SPDW, SPEM, FLIN, NIFTYBEES.NS): beta > 1.3 risk-off → −0.05–0.10; beta < 0.8 → +0.05. SATELLITE ETFs (SOXQ, XLK, AVUV, URNM, CIBR, SMIN, XBI): do NOT penalize high beta during panics; if structural tailwind intact, maintain or +0.05; only reduce if sector news is also structurally negative.
 4. **Dividend yield signals quality** — rising yield on QUAL/VTI/SPLG → +0.05.
 5. **Sector news is paired directly with each ETF** — assess capital flows, not sentiment; distinguish policy from noise.
 
@@ -429,7 +427,7 @@ class ExecutionResult(TypedDict):
 ### `sip_execution_mas` — direct MAS execution
 
 ```bash
-# Default: dry-run, $500 SIP, locked 14-ETF universe, 70/30 split
+# Default: dry-run, $500 SIP, locked 12-ETF universe, 70/30 split
 python -m sip_execution_mas
 
 # Custom SIP amount
@@ -438,7 +436,7 @@ python -m sip_execution_mas --sip 750
 # Custom risk limits
 python -m sip_execution_mas --max-position 0.20 --max-region 0.60
 
-# Stricter TER filter (used for consensus scoring; all 14 ETFs still included)
+# Stricter TER filter (used for consensus scoring; all 12 ETFs still included)
 python -m sip_execution_mas --ter 0.30
 
 # Live Alpaca paper trading (requires ALPACA_API_KEY)
@@ -453,8 +451,8 @@ python -m sip_execution_mas --force
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--sip` | float | 500.0 | Monthly SIP in USD |
-| `--top` | int | 14 | Ignored in locked-universe mode |
-| `--core` | int | 7 | Ignored in locked-universe mode |
+| `--top` | int | 12 | Ignored in locked-universe mode |
+| `--core` | int | 5 | Ignored in locked-universe mode |
 | `--core-pct` | float | 0.70 | Ignored in locked-universe mode (always 70%) |
 | `--ter` | float | 0.70 | TER ceiling used in expense score calculation |
 | `--max-position` | float | 0.15 | Max fraction per ETF (hard risk rule) |
@@ -464,7 +462,7 @@ python -m sip_execution_mas --force
 | `--ledger` | str | auto | Path to portfolio_ledger.json |
 | `--run-id` | str | auto | Custom run identifier |
 
-> `--top`, `--core`, `--core-pct` have no effect — the locked universe always invests all 14 ETFs with a fixed 70/30 split in both production and backtest.
+> `--top`, `--core`, `--core-pct` have no effect — the locked universe always invests all 12 ETFs with a fixed 70/30 split in both production and backtest.
 
 ### `simulator/scheduler.py` — monthly APScheduler
 
@@ -545,7 +543,7 @@ fin-agents/
     └── simulator/         Shared sub-package: allocator, ledger, Streamlit app, scheduler
 ```
 
-`sip_execution_mas` supersedes `etf-selection-mas` for ETF selection. The production universe is now locked (14 ETFs), eliminating month-to-month portfolio cycling from Gemini discovery variability. Gemini is used only for sentiment scoring and rationale generation.
+`sip_execution_mas` supersedes `etf-selection-mas` for ETF selection. The production universe is now locked (12 ETFs — v3), eliminating month-to-month portfolio cycling from Gemini discovery variability. Gemini is used only for sentiment scoring and rationale generation.
 
 ---
 
@@ -555,7 +553,7 @@ fin-agents/
 - `audit_retry_count` increments on every rejection. After `MAX_RETRIES=2` the run aborts even if only one minor rule was violated — by design, to prevent infinite loops.
 - `portfolio_ledger.json` records the *planned* allocation, not the exact broker fill. For fill-exact records use `execution_log.csv`.
 - Value-Averaging fires at most once per month (on clean approval). It increases *spending* but does not short or sell any position.
-- `yfinance` TER data is often missing; Node 1 falls back to the locked-universe `ter_pct` seed value, which is used for expense score calculation only (all 14 ETFs are always included regardless of TER).
+- `yfinance` TER data is often missing; Node 1 falls back to the locked-universe `ter_pct` seed value, which is used for expense score calculation only (all 12 ETFs are always included regardless of TER).
 - `trailing_volatility_3m` may be `None` for tickers with < 20 trading days of history; Node 3 falls back to `_VOL_FLOOR = 0.05` (5% annualised) in this case.
 - DDGS news can be empty during rate-limit windows; Node 2 VADER fallback handles this gracefully.
 - Gemini `response_mime_type="application/json"` occasionally wraps output in markdown; `_parse_json()` strips it.

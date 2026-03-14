@@ -57,14 +57,14 @@ EVICTION_THRESHOLD = 0.30
 # for money-market / ultra-low-vol ETFs such as LIQUIDBEES.NS).
 _VOL_FLOOR = 0.05   # 5% annualised
 
-# ── Locked production universe — 14 ETFs in two permanent buckets ─────────────
-# When filtered_tickers ⊆ _LOCKED_TICKERS the optimizer uses a fixed 70/30
+# ── Locked production universe — 12 ETFs in two permanent buckets ─────────────
+# When filtered_tickers ⊆ _LOCKED_TICKERS the optimizer uses a fixed core/sat
 # bucket split instead of sticky-select + rank-based compute_allocation.
 _CORE_TICKERS      = frozenset([
-    "VTI", "SPLG", "SPDW", "SPEM", "FLIN", "NIFTYBEES.NS", "QUAL",
+    "USCA", "SPDW", "SPEM", "FLIN", "NIFTYBEES.NS",
 ])
 _SATELLITE_TICKERS = frozenset([
-    "XLK", "QQQM", "SOXQ", "ICLN", "USCA", "ESGV", "XLY",
+    "SOXQ", "XLK", "AVUV", "URNM", "CIBR", "SMIN", "XBI",
 ])
 _LOCKED_TICKERS = _CORE_TICKERS | _SATELLITE_TICKERS
 _BUCKET_SPLIT   = 0.70   # core fraction of total SIP
@@ -552,7 +552,7 @@ def portfolio_optimizer_node(state: SIPExecutionState) -> dict:
 
     if is_locked:
         optimizer_notes = (
-            f"Locked 70/30 universe | Core {len(_CORE_TICKERS)} × {_BUCKET_SPLIT*100:.0f}% | "
+            f"Locked universe | Core {len(_CORE_TICKERS)} × {_BUCKET_SPLIT*100:.0f}% | "
             f"Satellite {len(_SATELLITE_TICKERS)} × {(1-_BUCKET_SPLIT)*100:.0f}% | "
             f"Region: {region_breakdown}"
         )

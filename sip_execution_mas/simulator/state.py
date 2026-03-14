@@ -116,6 +116,7 @@ class HistoricalBacktestResult(TypedDict):
     end_date: str                          # "YYYY-MM-DD"
     months_run: int
     sip_amount: float
+    core_pct: float                        # core bucket share used (e.g. 0.70)
     total_invested_usd: float
     current_value_usd: float
     total_pnl_usd: float

@@ -99,7 +99,7 @@ consensus_score = 0.60 × sentiment_score + 0.40 × expense_score
 
 ## sip-execution-mas
 
-A 6-node LangGraph execution loop that invests a **locked 14-ETF universe** each month. Node 1 fetches yfinance fundamentals + thematic DDGS news; Gemini (Node 2) acts as a 10-year horizon macro strategist to score sentiment and rotate satellite capital; hard risk rules audit the allocation; orders execute in paper or live mode.
+A 6-node LangGraph execution loop that invests a **locked 12-ETF universe** each month. Node 1 fetches yfinance fundamentals + thematic DDGS news; Gemini (Node 2) acts as a 10-year horizon macro strategist to score sentiment and rotate satellite capital; hard risk rules audit the allocation; orders execute in paper or live mode.
 
 **Pipeline:**
 ```
@@ -110,18 +110,18 @@ researcher → scorer → optimizer → auditor
                           abort    → logger (exits after 2 retries)
 ```
 
-**Fixed universe — two permanent buckets:**
+**Fixed universe — two permanent buckets (v3):**
 
 | Bucket | Tickers | Budget |
 |--------|---------|--------|
-| **Core** (broad market anchors) | VTI, SPLG, SPDW, SPEM, FLIN, NIFTYBEES.NS, QUAL | 70% of SIP |
-| **Satellite** (sectors / tech / green) | XLK, QQQM, SOXQ, ICLN, USCA, ESGV, XLY | 30% of SIP |
+| **Core** (low-cost beta anchors) | USCA, SPDW, SPEM, FLIN, NIFTYBEES.NS | 70% of SIP |
+| **Satellite** (thematic growth) | SOXQ, XLK, AVUV, URNM, CIBR, SMIN, XBI | 30% of SIP |
 
 Gemini sentiment rotates *how much* each satellite ETF receives — no ETF is ever dropped. Universe is identical in production and backtest; no Gemini discovery calls.
 
 **Node 1 — data payload per ETF:**
 - **Hard fundamentals:** `fwdPE`, `beta`, `dividend_yield`, `momentum_3m`, `ytd_return`, `trailing_volatility_3m`, `TER`
-- **Thematic news (4 categories, 2 DDGS queries each):** `TECH_SEMIS` · `GREEN_ESG` · `INDIA_EM` · `QUALITY_CORE`
+- **Thematic news (5 categories, 2 DDGS queries each):** `TECH_SEMIS` · `INDIA_EM` · `URANIUM_ENERGY` · `BIOTECH` · `QUALITY_CORE`
 
 **Node 2 — 10-year horizon macro strategist (Gemini):**
 Each ETF is evaluated via a structured block pairing `[Fundamentals]` (valuation anchor) with `[Sector News — CATEGORY]` (capital-flow catalysts). Scoring rules: P/E ceilings (>40x tech → max 0.75), beta regime scaling, dividend quality signal, structural-vs-cyclical distinction. Falls back to category-aware VADER if Gemini is unavailable.
@@ -142,7 +142,7 @@ python -m sip_execution_mas --force          # Bypass same-month rule
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--sip` | `500` | Monthly SIP budget in USD |
-| `--ter` | `0.70` | TER % used in expense scoring (all 14 ETFs always included) |
+| `--ter` | `0.70` | TER % used in expense scoring (all 12 ETFs always included) |
 | `--max-position` | `0.15` | Max single-ETF allocation (fraction) |
 | `--max-region` | `0.50` | Max single-region allocation (fraction) |
 | `--live` | off | Enable live Alpaca order submission |
@@ -163,8 +163,10 @@ weight_i         = consensus_score_i / Σ scores_in_bucket
 allocation_i     = weight_i × bucket_budget
 ```
 
-**Value-Averaging multiplier (Node 4):**
-When Gemini signals severe macro panic AND portfolio momentum shows a price floor (not free-fall), the SIP is automatically scaled up 20%: `effective_sip = sip × 1.20`.
+**Value-Averaging multiplier (Node 4 — Crash Accumulator):**
+When Gemini signals panic sentiment AND negative momentum, the SIP scales up automatically:
+- **Tier 1** (momentum > −15%): `effective_sip = sip × 1.20`
+- **Tier 2** (momentum ≤ −15%): `effective_sip = sip × 1.50`
 
 **5 hard risk rules (auditor):**
 1. No single ETF > `max_position_pct × SIP`

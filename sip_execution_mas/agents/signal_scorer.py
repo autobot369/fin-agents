@@ -58,21 +58,14 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 # ── Ticker → thematic category (shared by prompt builder and VADER fallback) ──
+# v4 universe: 5 ETFs across 3 thematic categories
 
 _TICKER_CATEGORY: Dict[str, str] = {
-    "XLK":          "TECH_SEMIS",
-    "QQQM":         "TECH_SEMIS",
-    "SOXQ":         "TECH_SEMIS",
-    "ICLN":         "GREEN_ESG",
-    "USCA":         "GREEN_ESG",
-    "ESGV":         "GREEN_ESG",
-    "FLIN":         "INDIA_EM",
+    "VWRA.L":       "QUALITY_CORE",
     "NIFTYBEES.NS": "INDIA_EM",
-    "SPEM":         "INDIA_EM",
-    "QUAL":         "QUALITY_CORE",
-    "VTI":          "QUALITY_CORE",
-    "SPLG":         "QUALITY_CORE",
-    "SPDW":         "QUALITY_CORE",
+    "IUIT.L":       "TECH_SEMIS",
+    "VVSM.L":       "QUALITY_CORE",
+    "MOM100.NS":    "INDIA_EM",
 }
 
 
@@ -145,13 +138,13 @@ Scoring framework — apply these rules IN ORDER:
      Low fwdPE (<15x) with positive news → score can reach 0.90+.
 
   3. BETA AND RISK-REGIME ADJUSTMENT — SATELLITE VS CORE DISTINCTION.
-     For CORE ETFs (broad market / quality factor: VTI, SPLG, SPDW, SPEM, QUAL):
+     For CORE ETFs (VWRA.L — global all-world UCITS; NIFTYBEES.NS — India Nifty 50):
        Beta > 1.3 in a risk-off macro environment → reduce score by 0.05–0.10.
        Beta < 0.8 in a risk-off environment → increase score by 0.05 (defensive benefit confirmed).
-     For SATELLITE ETFs (TECH_SEMIS, GREEN_ESG, INDIA_EM: XLK, QQQM, SOXQ, ICLN, USCA, ESGV, XLY):
+     For SATELLITE ETFs (IUIT.L — S&P 500 tech UCITS; VVSM.L — US small-cap UCITS; MOM100.NS — India midcap):
        Do NOT penalize high beta during macro panics or risk-off regimes.
        If beta > 1.3 AND sector news confirms the structural tailwind is INTACT
-       (AI capex cycle, clean energy policy, EM manufacturing rotation, etc.),
+       (AI capex cycle, EM manufacturing rotation, India growth, etc.),
        MAINTAIN the score or INCREASE by +0.05. High-beta Satellite ETFs at discounted
        prices with intact structural catalysts are aggressive accumulation targets on a
        10-year horizon — treat them accordingly.
@@ -159,7 +152,7 @@ Scoring framework — apply these rules IN ORDER:
        (policy reversal, technology obsolescence, or permanent demand destruction).
 
   4. DIVIDEND YIELD SIGNALS QUALITY.
-     Rising dividend yield on QUAL, VTI, SPLG is a cash-flow governance signal → +0.05 to score.
+     Rising dividend yield on VWRA.L is a cash-flow quality signal → +0.05 to score.
 
   5. SECTOR NEWS IS PAIRED DIRECTLY WITH EACH ETF — use it to assess real capital flows,
      not sentiment. A headline about $40B hyperscaler capex is structural for SOXQ.

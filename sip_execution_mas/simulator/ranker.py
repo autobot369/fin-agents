@@ -43,78 +43,58 @@ def _patch_ssl() -> None:
 
 _patch_ssl()
 
-# ── Locked ETF Universe (v3 — matches production MAS) ─────────────────────────
-# Core bucket (70% of SIP) — broad market anchors
+# ── Locked ETF Universe (v4 — Tax Optimised, matches production MAS) ──────────
+# Core bucket (70% of SIP) — UCITS All-World + India Nifty direct
 CORE_UNIVERSE: List[str] = [
-    "USCA", "SPDW", "SPEM", "FLIN", "NIFTYBEES.NS",
+    "VWRA.L", "NIFTYBEES.NS",
 ]
-# Satellite bucket (30% of SIP) — thematic growth
+# Satellite bucket (30% of SIP) — UCITS tech + UCITS US small-cap + India midcap
 SATELLITE_UNIVERSE: List[str] = [
-    "SOXQ", "XLK", "AVUV", "URNM", "CIBR", "SMIN", "XBI",
+    "IUIT.L", "VVSM.L", "MOM100.NS",
 ]
 
-# Ranker region mapping (INTL = US-listed, BSE = NSE India)
-INTL_UNIVERSE: List[str] = [t for t in CORE_UNIVERSE + SATELLITE_UNIVERSE if not t.endswith(".NS")]
+# Ranker region mapping (LSE = London Stock Exchange UCITS, BSE = NSE India)
+LSE_UNIVERSE:  List[str] = ["VWRA.L", "IUIT.L", "VVSM.L"]
 HKCN_UNIVERSE: List[str] = []   # no HK/China exposure in locked universe
-BSE_UNIVERSE:  List[str] = ["NIFTYBEES.NS"]
-ALL_TICKERS = INTL_UNIVERSE + BSE_UNIVERSE
+BSE_UNIVERSE:  List[str] = ["NIFTYBEES.NS", "MOM100.NS"]
+ALL_TICKERS = LSE_UNIVERSE + BSE_UNIVERSE
 
 # ── TER fallback registry (fund prospectuses, Q1 2026) ───────────────────────
 
 TER_REGISTRY: Dict[str, float] = {
-    # Core — broad market
-    "USCA":         0.0007,
-    "SPDW":         0.0004,
-    "SPEM":         0.0007,
-    "FLIN":         0.0019,
-    # Core — India NSE
+    # Core — UCITS + India direct
+    "VWRA.L":       0.0022,
     "NIFTYBEES.NS": 0.0004,
-    # Satellite — thematic growth
-    "SOXQ": 0.0019,
-    "XLK":  0.0010,
-    "AVUV": 0.0025,
-    "URNM": 0.0083,
-    "CIBR": 0.0060,
-    "SMIN": 0.0074,
-    "XBI":  0.0035,
+    # Satellite — UCITS tech + small-cap + India midcap
+    "IUIT.L":       0.0015,
+    "VVSM.L":       0.0030,
+    "MOM100.NS":    0.0028,
 }
 
 # ── ETF metadata (category, trade_on) ────────────────────────────────────────
 
 ETF_META: Dict[str, Dict[str, str]] = {
-    # Core — broad market
-    "USCA":         {"category": "US Large-Cap Core",    "trade_on": "Alpaca", "bucket": "core"},
-    "SPDW":         {"category": "Developed ex-US",      "trade_on": "Alpaca", "bucket": "core"},
-    "SPEM":         {"category": "Emerging Markets",     "trade_on": "Alpaca", "bucket": "core"},
-    "FLIN":         {"category": "India (US-listed)",    "trade_on": "Alpaca", "bucket": "core"},
-    # Core — India NSE
-    "NIFTYBEES.NS": {"category": "Nifty 50",             "trade_on": "Dhan",   "bucket": "core"},
-    # Satellite — thematic growth
-    "SOXQ": {"category": "Semiconductors",       "trade_on": "Alpaca", "bucket": "satellite"},
-    "XLK":  {"category": "Technology Sector",    "trade_on": "Alpaca", "bucket": "satellite"},
-    "AVUV": {"category": "US Small-Cap Value",   "trade_on": "Alpaca", "bucket": "satellite"},
-    "URNM": {"category": "Uranium / Nuclear",    "trade_on": "Alpaca", "bucket": "satellite"},
-    "CIBR": {"category": "Cybersecurity",        "trade_on": "Alpaca", "bucket": "satellite"},
-    "SMIN": {"category": "India Small-Cap",      "trade_on": "Alpaca", "bucket": "satellite"},
-    "XBI":  {"category": "Biotech",              "trade_on": "Alpaca", "bucket": "satellite"},
+    # Core — UCITS global + India NSE
+    "VWRA.L":       {"category": "Global All-World UCITS",    "trade_on": "IBKR",  "bucket": "core"},
+    "NIFTYBEES.NS": {"category": "Nifty 50",                  "trade_on": "Dhan",  "bucket": "core"},
+    # Satellite — UCITS tech + US small-cap + India midcap
+    "IUIT.L":       {"category": "S&P 500 Tech Sector UCITS", "trade_on": "IBKR",  "bucket": "satellite"},
+    "VVSM.L":       {"category": "US Small-Cap UCITS",        "trade_on": "IBKR",  "bucket": "satellite"},
+    "MOM100.NS":    {"category": "India Midcap 100",          "trade_on": "Dhan",  "bucket": "satellite"},
 }
 
 # ── News queries per region ───────────────────────────────────────────────────
 
 NEWS_QUERIES: Dict[str, List[str]] = {
-    "INTL": [
-        "hyperscaler AI semiconductor demand ETF 2026",
-        "US large-cap broad market ETF momentum Fed rate",
-        "uranium nuclear energy AI data center power demand",
-        "cybersecurity spending NASDAQ ETF 2026",
-        "US small-cap value ETF performance 2026",
+    "LSE": [
+        "FTSE All-World global equity broad market UCITS ETF 2026",
+        "S&P 500 technology sector AI capex UCITS ETF LSE 2026",
+        "US small-cap MSCI growth UCITS ETF Fed rate outlook",
     ],
     "BSE": [
         "India Nifty 50 ETF FII flows outlook 2026",
-        "RBI monetary policy India small-cap 2026",
-        "India GDP growth manufacturing supply chain",
-        "NSE ETF Nifty rally emerging market",
-        "India biotech pharma sector 2026",
+        "RBI monetary policy India midcap 2026",
+        "India GDP growth manufacturing supply chain NSE ETF rally",
     ],
 }
 
@@ -126,14 +106,16 @@ NEWS_QUERIES: Dict[str, List[str]] = {
 def _region(ticker: str) -> str:
     if ticker in BSE_UNIVERSE:   return "BSE"
     if ticker in HKCN_UNIVERSE:  return "HKCN"
+    if ticker in LSE_UNIVERSE:   return "LSE"
     return "INTL"
 
 
 def _market_label(ticker: str) -> str:
     if ticker.endswith(".NS"):
         return "NSE"
-    meta = ETF_META.get(ticker, {})
-    return "NYSE" if meta.get("trade_on") == "Alpaca" and ticker in ("USCA", "SPDW", "SPEM", "FLIN", "AVUV", "URNM", "SMIN", "XLK", "XBI") else "NASDAQ"
+    if ticker.endswith(".L"):
+        return "LSE"
+    return "NASDAQ"
 
 
 def fetch_etf_metrics(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -395,7 +377,7 @@ def run_ranker(
 
     print(f"\n{'='*60}")
     print(f"  NO-LLM ETF RANKER  —  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  Universe : {len(ALL_TICKERS)} ETFs (v3)  |  TER ceiling: {ter_threshold*100:.2f}%")
+    print(f"  Universe : {len(ALL_TICKERS)} ETFs (v4 — Tax Optimised)  |  TER ceiling: {ter_threshold*100:.2f}%")
     print(f"{'='*60}")
 
     # 1. Metrics

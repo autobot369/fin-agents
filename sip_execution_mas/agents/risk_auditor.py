@@ -8,6 +8,7 @@ Hard rule-checker. Never approves a portfolio that violates:
   Rule 3  MIN_POSITION  — no ETF allocated < $1.00 USD
   Rule 4  NO_DUPLICATE  — ledger already has an entry for this calendar month
   Rule 5  MIN_ORDERS    — at least 1 valid order must exist
+  Rule 6  MIN_LOT_SIZE  — no trade < $30.00 USD (IBKR ~$2.00 min fee = >6% drag)
 
 If violations exist:
   - retry_count < MAX_RETRIES  → reject (loops back to Node 3)
@@ -49,6 +50,20 @@ if str(_SIP_ROOT) not in sys.path:
 
 MAX_RETRIES = 2
 
+# Rule 6: minimum trade size — IBKR charges ~$2.00/trade, so anything below
+# $30 results in >6% immediate fee drag.
+MIN_TRADE_USD = 30.0
+
+# ── Dynamic region-cap boosts per VA tier ─────────────────────────────────────
+# Applied on top of the base max_region_pct when a region is in a dip/crash.
+# Tier 1 (standard dip)     : avg 3m-momentum in (-15%, 0%]  → +10 pp
+# Tier 2 (generational crash): avg 3m-momentum <= -15%        → +20 pp
+_VA_REGION_BOOST: Dict[int, float] = {
+    0: 0.00,
+    1: 0.10,
+    2: 0.20,
+}
+
 # ── Value-Averaging constants ─────────────────────────────────────────────────
 
 # Tier 1: standard dip — panic present AND momentum between -15% and 0%
@@ -72,13 +87,78 @@ _PANIC_TRIGGER_TOKENS = {
 }
 
 
+# ── Per-region dynamic cap computation ───────────────────────────────────────
+
+def _compute_per_region_caps(
+    tickers_by_region: Dict[str, List[str]],
+    sentiment_scores: Dict[str, float],
+    all_etf_data: Dict[str, Any],
+    boom_triggers: List[str],
+    base_max_region_pct: float,
+) -> Dict[str, float]:
+    """
+    Compute a per-region cap (as fraction of SIP) based on the VA tier for
+    each region's constituent ETFs.
+
+    Logic per region:
+      1. Panic present if any _PANIC_TRIGGER_TOKENS in boom_triggers OR
+         region-average sentiment < PANIC_SENTIMENT_THRESHOLD.
+      2. If no panic → use base_max_region_pct (e.g. 0.50).
+      3. If panic:
+           avg_momentum_3m <= MOMENTUM_CRASH_THRESHOLD → Tier 2 (+0.20)
+           avg_momentum_3m in (MOMENTUM_CRASH_THRESHOLD, 0.0] → Tier 1 (+0.10)
+           avg_momentum_3m > 0.0 (market hasn't dipped yet) → Tier 0 (no boost)
+
+    Returns: {region: adjusted_max_pct}
+    """
+    trigger_tokens = {t.upper() for t in boom_triggers}
+    result: Dict[str, float] = {}
+
+    for region, tickers in tickers_by_region.items():
+        if not tickers:
+            result[region] = base_max_region_pct
+            continue
+
+        # Panic check — global triggers OR region-average sentiment below threshold
+        sentiments = [sentiment_scores.get(t, 0.50) for t in tickers]
+        avg_sentiment = sum(sentiments) / len(sentiments)
+        is_panic = (
+            bool(trigger_tokens & _PANIC_TRIGGER_TOKENS)
+            or avg_sentiment < PANIC_SENTIMENT_THRESHOLD
+        )
+
+        if not is_panic:
+            result[region] = base_max_region_pct
+            continue
+
+        # Momentum tier — use this region's ETFs only
+        moms = [all_etf_data.get(t, {}).get("momentum_3m") for t in tickers]
+        valid_moms = [m for m in moms if m is not None]
+        if not valid_moms:
+            result[region] = base_max_region_pct
+            continue
+
+        avg_mom = sum(valid_moms) / len(valid_moms)
+        if avg_mom <= MOMENTUM_CRASH_THRESHOLD:
+            tier = 2
+        elif avg_mom <= 0.0:
+            tier = 1
+        else:
+            tier = 0  # panic signal but prices still rising — no boost yet
+
+        boosted = round(base_max_region_pct + _VA_REGION_BOOST[tier], 4)
+        result[region] = boosted
+
+    return result
+
+
 # ── Hard rule checks ──────────────────────────────────────────────────────────
 
 def _check_rules(
     proposed_orders: List[ProposedOrder],
     sip_amount: float,
     max_position_pct: float,
-    max_region_pct: float,
+    per_region_caps: Dict[str, float],
     ledger_path: str,
 ) -> List[str]:
     violations: List[str] = []
@@ -99,19 +179,21 @@ def _check_rules(
                 f"(${position_cap:.2f})."
             )
 
-    # Rule 2: per-region cap
+    # Rule 2: per-region cap (dynamic — boosted for regions in VA Tier 1/2 dip)
     region_totals: Dict[str, float] = {}
     for order in proposed_orders:
         r = order.get("region", "INTL")
         region_totals[r] = region_totals.get(r, 0) + order["monthly_usd"]
 
-    region_cap = sip_amount * max_region_pct
+    default_region_pct = max(per_region_caps.values()) if per_region_caps else 0.50
     for region, total in region_totals.items():
+        cap_pct = per_region_caps.get(region, default_region_pct)
+        region_cap = sip_amount * cap_pct
         if total > region_cap + 0.01:   # 1-cent tolerance for rounding
             pct = total / sip_amount * 100
             violations.append(
                 f"RULE_2_VIOLATION: Region {region} allocated ${total:.2f} "
-                f"({pct:.1f}% of SIP) exceeds max {max_region_pct*100:.0f}% "
+                f"({pct:.1f}% of SIP) exceeds dynamic cap {cap_pct*100:.0f}% "
                 f"(${region_cap:.2f})."
             )
 
@@ -121,6 +203,17 @@ def _check_rules(
             violations.append(
                 f"RULE_3_VIOLATION: {order['ticker']} allocated ${order['monthly_usd']:.2f} "
                 f"is below minimum $1.00."
+            )
+
+    # Rule 6: minimum lot size — broker minimum fee makes sub-$30 trades uneconomic
+    for order in proposed_orders:
+        if order["monthly_usd"] <= MIN_TRADE_USD:
+            fee_drag_pct = 2.00 / order["monthly_usd"] * 100 if order["monthly_usd"] > 0 else 100.0
+            violations.append(
+                f"RULE_6_VIOLATION: {order['ticker']} allocated ${order['monthly_usd']:.2f} "
+                f"is below minimum trade size ${MIN_TRADE_USD:.2f} "
+                f"(IBKR ~$2.00 fee = {fee_drag_pct:.1f}% drag). "
+                f"Re-allocate this position into larger holdings."
             )
 
     # Rule 4: duplicate month check
@@ -360,15 +453,47 @@ def risk_auditor_node(state: SIPExecutionState) -> dict:
     if force and not dry_run:
         print(f"  [Node 4] --force active: Rule 4 (duplicate month) bypassed")
 
+    # ── Compute per-region dynamic caps based on VA tier per region ───────────
+    tickers_by_region: Dict[str, List[str]] = {}
+    for order in proposed_orders:
+        r = order.get("region", "INTL")
+        tickers_by_region.setdefault(r, []).append(order["ticker"])
+
+    per_region_caps = _compute_per_region_caps(
+        tickers_by_region,
+        sentiment_scores,
+        all_etf_data,
+        boom_triggers,
+        max_region_pct,
+    )
+
+    for region, cap in sorted(per_region_caps.items()):
+        boost = cap - max_region_pct
+        if boost > 0.005:
+            tier = 2 if boost >= _VA_REGION_BOOST[2] - 0.005 else 1
+            print(
+                f"  [Node 4] Region {region}: cap {max_region_pct*100:.0f}% → "
+                f"{cap*100:.0f}% (VA Tier {tier} dip detected)"
+            )
+        else:
+            print(f"  [Node 4] Region {region}: cap {cap*100:.0f}% (no dip)")
+
     effective_ledger = "__skip_rule4__" if skip_rule4 else ledger_path
 
     violations = _check_rules(
-        proposed_orders, sip_amount, max_position_pct, max_region_pct,
+        proposed_orders, sip_amount, max_position_pct, per_region_caps,
         effective_ledger,
     )
 
     # Generate audit notes via Gemini
     audit_notes = _gemini_audit_notes(violations, proposed_orders, sip_amount)
+
+    # Identify dust tickers for Rule 6 — passed to Node 3 on retry so the
+    # optimizer knows exactly which positions to consolidate.
+    dust_tickers = [
+        o["ticker"] for o in proposed_orders
+        if o["monthly_usd"] <= MIN_TRADE_USD
+    ]
 
     approved  = len(violations) == 0
     new_retry = retry_count + (0 if approved else 1)
@@ -416,6 +541,11 @@ def risk_auditor_node(state: SIPExecutionState) -> dict:
         "risk_violations":   violations,
         "risk_audit_notes":  audit_notes,
         "audit_retry_count": new_retry,
+        # Dynamic per-region caps — passed to Node 3 on retry so the optimizer
+        # knows the correct headroom per region when applying violation fixes.
+        "per_region_caps":   per_region_caps,
+        # Dust tickers (Rule 6) — passed to Node 3 so it can consolidate them.
+        "dust_tickers":      dust_tickers,
         # VA fields — always written so state is consistent
         "va_triggered":      va_triggered,
         "va_multiplier":     va_mult,

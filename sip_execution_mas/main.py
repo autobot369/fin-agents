@@ -61,18 +61,18 @@ def main() -> None:
     )
     p.add_argument("--sip",          type=float, default=500.0,
                    help="Monthly SIP amount in USD (default: 500)")
-    p.add_argument("--top",          type=int,   default=10,
-                   help="Total ETFs to invest in (default: 10)")
-    p.add_argument("--core",         type=int,   default=5,
-                   help="Core ETF count (default: 5)")
+    p.add_argument("--top",          type=int,   default=5,
+                   help="Total ETFs to invest in (default: 5, locked v4 universe)")
+    p.add_argument("--core",         type=int,   default=2,
+                   help="Core ETF count (default: 2, locked v4 universe)")
     p.add_argument("--core-pct",     type=float, default=0.70,
                    help="Fraction of SIP for core bucket (default: 0.70)")
     p.add_argument("--ter",          type=float, default=0.70,
                    help="TER ceiling %% for ETF filter (default: 0.70)")
-    p.add_argument("--max-position", type=float, default=0.15,
-                   help="Max fraction of SIP per ETF (default: 0.15 = 15%%)")
-    p.add_argument("--max-region",   type=float, default=0.50,
-                   help="Max fraction of SIP per region (default: 0.50 = 50%%)")
+    p.add_argument("--max-position", type=float, default=0.50,
+                   help="Max fraction of SIP per ETF (default: 0.50 = 50%%, raised for 5-ETF v4 universe)")
+    p.add_argument("--max-region",   type=float, default=0.80,
+                   help="Max fraction of SIP per region (default: 0.80 = 80%%, raised for LSE-heavy v4 universe)")
     p.add_argument("--live",         action="store_true",
                    help="Disable dry-run; execute via broker API (default: off)")
     p.add_argument("--force",        action="store_true",
@@ -96,11 +96,10 @@ def main() -> None:
 
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║          SIP EXECUTION MAS  —  Gemini 6-Node Loop           ║
+║     SIP EXECUTION MAS  —  Gemini 6-Node Loop  (v4)          ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  SIP          : ${args.sip:.2f}
-║  Top-N        : {args.top}
-║  Core / Sat   : {args.core} / {args.top - args.core}
+║  Universe     : v4 — 5 ETFs (2 core / 3 satellite)
 ║  TER ceiling  : {args.ter:.2f}%
 ║  Max position : {args.max_position*100:.0f}%
 ║  Max region   : {args.max_region*100:.0f}%

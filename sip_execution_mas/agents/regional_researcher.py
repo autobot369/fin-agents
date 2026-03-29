@@ -1,21 +1,21 @@
 """
 Node 1 — Regional Alpha & Cost Orchestrator
 =============================================
-Uses a locked 12-ETF universe split into two permanent buckets.
-Universe discovery has been removed — the 12 tickers never change.
+Uses a locked 5-ETF universe split into two permanent buckets (v4 — Tax Optimised).
+Universe discovery has been removed — the 5 tickers never change.
 
 Node 1 responsibilities:
-  1. Build ETFRecord for all 12 locked tickers via yfinance.
+  1. Build ETFRecord for all 5 locked tickers via yfinance.
   2. Fetch recent macro news (DuckDuckGo + yfinance.news) for Node 2
      (signal_scorer). News drives satellite weight rotation — it is the
      only variable input per month.
-  3. Always passes all 14 tickers as filtered_tickers (no TER/liquidity cull).
+  3. Always passes all 5 tickers as filtered_tickers (no TER/liquidity cull).
 
-Locked buckets:
-  Core (70% of SIP, 7 ETFs):
-    VTI · SPLG · SPDW · SPEM · FLIN · NIFTYBEES.NS · QUAL
-  Satellite (30% of SIP, 7 ETFs):
-    XLK · QQQM · SOXQ · ICLN · USCA · ESGV · XLY
+Locked buckets (v4 — Tax Optimised, LSE UCITS + BSE direct):
+  Core (70% of SIP, 2 ETFs):
+    VWRA.L · NIFTYBEES.NS
+  Satellite (30% of SIP, 3 ETFs):
+    IUIT.L · VVSM.L · MOM100.NS
 
 Backtest mode (as_of_date set):
   yfinance data and news are bounded to as_of_date for historical accuracy.
@@ -42,27 +42,19 @@ _BROKERAGE_MIN: Dict[str, float] = {
 _TRADE_SIZE  = 500.0        # Reference trade size in USD
 
 
-# ── Locked universe (12 ETFs, v3) ────────────────────────────────────────────
-# Core (5): Broad-market anchors — low-cost beta + India strategic overweight
-# Satellite (7): Thematic growth — semis, tech, small-cap value, uranium,
-#                cybersecurity, India small-cap, biotech
+# ── Locked universe (5 ETFs, v4 — Tax Optimised) ─────────────────────────────
+# Core (2): UCITS All-World + India Nifty direct — zero US dividend withholding
+# Satellite (3): UCITS tech + UCITS US small-cap + India midcap direct
 
 _CORE_UNIVERSE: List[Dict[str, Any]] = [
-    {"ticker": "USCA",         "name": "BNY Mellon US Large Cap Core Equity ETF",  "ter_pct": 0.07, "category": "broad_market",       "market": "NYSE",   "region": "US"},
-    {"ticker": "SPDW",         "name": "SPDR Portfolio Developed World ex-US ETF", "ter_pct": 0.04, "category": "developed_markets",   "market": "NYSE",   "region": "US"},
-    {"ticker": "SPEM",         "name": "SPDR Portfolio Emerging Markets ETF",      "ter_pct": 0.07, "category": "emerging_markets",    "market": "NYSE",   "region": "US"},
-    {"ticker": "FLIN",         "name": "Franklin FTSE India ETF",                  "ter_pct": 0.19, "category": "india",               "market": "NYSE",   "region": "US"},
-    {"ticker": "NIFTYBEES.NS", "name": "Nippon India ETF Nifty 50 BeES",           "ter_pct": 0.04, "category": "india",               "market": "NSE",    "region": "BSE"},
+    {"ticker": "VWRA.L",      "name": "Vanguard FTSE All-World UCITS ETF",      "ter_pct": 0.22, "category": "global_all_world",  "market": "LSE", "region": "LSE"},
+    {"ticker": "NIFTYBEES.NS","name": "Nippon India ETF Nifty 50 BeES",          "ter_pct": 0.04, "category": "india",             "market": "NSE", "region": "BSE"},
 ]
 
 _SATELLITE_UNIVERSE: List[Dict[str, Any]] = [
-    {"ticker": "SOXQ", "name": "Invesco PHLX Semiconductor ETF",              "ter_pct": 0.19, "category": "semiconductors",  "market": "NASDAQ", "region": "US"},
-    {"ticker": "XLK",  "name": "Technology Select Sector SPDR Fund",          "ter_pct": 0.10, "category": "technology",      "market": "NYSE",   "region": "US"},
-    {"ticker": "AVUV", "name": "Avantis U.S. Small Cap Value ETF",             "ter_pct": 0.25, "category": "small_cap_value", "market": "NYSE",   "region": "US"},
-    {"ticker": "URNM", "name": "Sprott Uranium Miners ETF",                    "ter_pct": 0.83, "category": "uranium_energy",  "market": "NYSE",   "region": "US"},
-    {"ticker": "CIBR", "name": "First Trust NASDAQ Cybersecurity ETF",         "ter_pct": 0.60, "category": "cybersecurity",   "market": "NASDAQ", "region": "US"},
-    {"ticker": "SMIN", "name": "iShares MSCI India Small-Cap ETF",             "ter_pct": 0.74, "category": "india_small_cap", "market": "NYSE",   "region": "US"},
-    {"ticker": "XBI",  "name": "SPDR S&P Biotech ETF",                         "ter_pct": 0.35, "category": "biotech",         "market": "NYSE",   "region": "US"},
+    {"ticker": "IUIT.L",      "name": "iShares S&P 500 Tech Sector UCITS ETF",  "ter_pct": 0.15, "category": "technology",        "market": "LSE", "region": "LSE"},
+    {"ticker": "WSML.L",      "name": "iShares MSCI World Small Cap UCITS ETF", "ter_pct": 0.35, "category": "small_cap_value",   "market": "LSE", "region": "LSE"},
+    {"ticker": "MOM100.NS",   "name": "Motilal Oswal Nifty Midcap 100 ETF",     "ter_pct": 0.28, "category": "india_midcap",      "market": "NSE", "region": "BSE"},
 ]
 
 _LOCKED_UNIVERSE            = _CORE_UNIVERSE + _SATELLITE_UNIVERSE
@@ -77,40 +69,25 @@ _SATELLITE_UNIVERSE_TICKERS = frozenset(r["ticker"] for r in _SATELLITE_UNIVERSE
 _CATEGORY_QUERIES: Dict[str, List[str]] = {
     "TECH_SEMIS": [
         "hyperscaler data center capex AI infrastructure semiconductor demand 2026",
-        "TSMC chip supply chain NVIDIA AI accelerator NASDAQ cybersecurity spending",
+        "S&P 500 technology sector NASDAQ AI software cloud spending growth",
     ],
     "INDIA_EM": [
         "FII foreign institutional investor flows India NSE RBI monetary policy 2026",
-        "emerging market supply chain relocation India trade manufacturing small-cap",
-    ],
-    "URANIUM_ENERGY": [
-        "uranium spot price nuclear energy AI data center power demand 2026",
-        "Sprott uranium miners energy transition nuclear reactor capacity",
-    ],
-    "BIOTECH": [
-        "FDA drug approval biotech GLP-1 weight loss RNA therapy 2026",
-        "biotech M&A pipeline equal-weight XBI rate sensitivity innovation",
+        "India midcap small-cap growth manufacturing supply chain Nifty rally 2026",
     ],
     "QUALITY_CORE": [
-        "US large-cap equity broad market Federal Reserve outlook 2026",
-        "developed world international equities Europe Japan dividend growth",
+        "FTSE All-World global equity broad market Federal Reserve outlook 2026",
+        "US small-cap value equity global diversification dividend growth developed markets",
     ],
 }
 
 # Ticker → thematic category (drives targeted DDGS queries and VADER grouping)
 _TICKER_CATEGORY: Dict[str, str] = {
-    "SOXQ":         "TECH_SEMIS",
-    "XLK":          "TECH_SEMIS",
-    "CIBR":         "TECH_SEMIS",
-    "FLIN":         "INDIA_EM",
+    "VWRA.L":       "QUALITY_CORE",
     "NIFTYBEES.NS": "INDIA_EM",
-    "SPEM":         "INDIA_EM",
-    "SMIN":         "INDIA_EM",
-    "URNM":         "URANIUM_ENERGY",
-    "XBI":          "BIOTECH",
-    "USCA":         "QUALITY_CORE",
-    "SPDW":         "QUALITY_CORE",
-    "AVUV":         "QUALITY_CORE",
+    "IUIT.L":       "TECH_SEMIS",
+    "WSML.L":       "QUALITY_CORE",
+    "MOM100.NS":    "INDIA_EM",
 }
 
 
@@ -119,6 +96,8 @@ _TICKER_CATEGORY: Dict[str, str] = {
 def _recommend_broker(ticker: str) -> str:
     if ticker.endswith(".NS") or ticker.endswith(".BO"):
         return "Dhan"
+    if ticker.endswith(".L"):
+        return "ibkr_stub"   # LSE UCITS — Interactive Brokers (paper stub)
     return "Alpaca"
 
 
@@ -200,6 +179,46 @@ def _fetch_yfinance_batch(
 
             avg_vol = info.get("averageVolume") or info.get("averageDailyVolume10Day")
 
+            # ── LSE-specific enrichment ───────────────────────────────────────
+            trading_currency: Optional[str] = None
+            if ticker.endswith(".L"):
+                # Pass 1 — explicit currency label from yfinance.
+                # yfinance returns "GBp" (pence) for GBP-class LSE ETFs, "USD"
+                # for USD-denominated share classes (VWRA, IUIT, WSML), and
+                # sometimes "GBP" directly.
+                raw_ccy = (info.get("currency") or "USD").strip()
+                if raw_ccy == "GBp":
+                    price            = round(price / 100.0, 4)   # pence → pounds
+                    trading_currency = "GBP"
+                    print(f"  [Node 1] {ticker}: GBp label → price ÷100 → £{price:.4f}")
+
+                else:
+                    trading_currency = raw_ccy   # "USD" or "GBP"
+
+                    # Pass 2 — magnitude sanity check.
+                    # yfinance occasionally labels a pence-priced ticker as "USD"
+                    # or "GBP" (label mismatch).  Real USD/GBP prices for the ETFs
+                    # in this universe are all < $300.  If we see a price > 500 the
+                    # label is wrong and the value is almost certainly in pence.
+                    # Divide by 100 and keep the reported currency label; a £9.50
+                    # ETF showing as 950 GBp → 9.50 GBP is the canonical example.
+                    if price > 500:
+                        raw_price = price
+                        price            = round(price / 100.0, 4)
+                        trading_currency = "GBP"   # pence always normalises to GBP
+                        print(
+                            f"  [Node 1] {ticker}: pence mismatch detected "
+                            f"(label={raw_ccy}, raw={raw_price:.2f}) → "
+                            f"÷100 → £{price:.4f}"
+                        )
+
+                # yfinance often returns None for LSE averageVolume — fall back
+                # to the 30-day mean of the history Volume column.
+                if not avg_vol and "Volume" in hist.columns:
+                    vol_series = hist["Volume"].tail(30)
+                    if not vol_series.empty and vol_series.sum() > 0:
+                        avg_vol = int(vol_series.mean())
+
             # Hard fundamental metrics for Gemini valuation anchoring
             _fpe = info.get("forwardPE")
             _beta = info.get("beta")
@@ -209,18 +228,19 @@ def _fetch_yfinance_batch(
             dividend_yield = round(float(_div),  4) if _div  and isinstance(_div,  (int, float)) else None
 
             results[ticker] = {
-                "price":         round(price, 4),
-                "ytd":           ytd,
-                "mom3m":         mom3m,
-                "mom1m":         mom1m,
-                "vol_3m":        vol_3m,
-                "ter":           ter,
-                "aum_b":         aum_b,
-                "avg_vol":       int(avg_vol) if avg_vol else None,
-                "forward_pe":    forward_pe,
-                "beta":          beta,
-                "dividend_yield": dividend_yield,
-                "source":        "yfinance",
+                "price":            round(price, 4),
+                "ytd":              ytd,
+                "mom3m":            mom3m,
+                "mom1m":            mom1m,
+                "vol_3m":           vol_3m,
+                "ter":              ter,
+                "aum_b":            aum_b,
+                "avg_vol":          int(avg_vol) if avg_vol else None,
+                "forward_pe":       forward_pe,
+                "beta":             beta,
+                "dividend_yield":   dividend_yield,
+                "trading_currency": trading_currency,   # None for non-LSE tickers
+                "source":           "yfinance",
             }
         except Exception as exc:
             results[ticker] = {"error": str(exc)}
@@ -309,7 +329,7 @@ def regional_researcher_node(state: SIPExecutionState) -> dict:
     as_of_date = state.get("as_of_date")   # None in production
 
     suffix = f" [as-of {as_of_date}]" if as_of_date else ""
-    print(f"\n[Node 1] Building locked 12-ETF universe{suffix} …")
+    print(f"\n[Node 1] Building locked 5-ETF universe v4{suffix} …")
 
     all_tickers = [r["ticker"] for r in _LOCKED_UNIVERSE]
 
@@ -349,10 +369,23 @@ def regional_researcher_node(state: SIPExecutionState) -> dict:
                 ) if ter is not None else None
             )
 
-            currency = "INR" if market == "BSE" else "USD"
+            if market == "BSE":
+                currency = "INR"
+            elif market == "LSE":
+                # Use the actual trading currency captured from yfinance.
+                # Most UCITS ETFs in this universe (VWRA, IUIT, VVSM) trade in
+                # USD on LSE; fall back to GBP only when yfinance confirms it.
+                trading_ccy = r.get("trading_currency")
+                currency = trading_ccy if trading_ccy in ("USD", "GBP") else "GBP"
+            else:
+                currency = "USD"
             category = rec.get("category", "ETF")
             if currency == "INR":
                 category = f"{category} [INR — via Dhan]"
+            elif currency == "GBP":
+                category = f"{category} [GBP — via IBKR]"
+            elif currency == "USD" and market == "LSE":
+                category = f"{category} [USD — via IBKR]"
 
             record: ETFRecord = {
                 "ticker":                 ticker,
@@ -383,7 +416,7 @@ def regional_researcher_node(state: SIPExecutionState) -> dict:
             etf_data[ticker] = record
             filtered.append(ticker)   # all 12 always pass
 
-    print(f"[Node 1] {len(filtered)} ETFs ready "
+    print(f"[Node 1] {len(filtered)} ETFs ready v4 "
           f"({len(_CORE_UNIVERSE_TICKERS)} core + {len(_SATELLITE_UNIVERSE_TICKERS)} satellite)")
 
     return {

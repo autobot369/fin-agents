@@ -15,8 +15,8 @@ class ETFRecord(TypedDict):
     """Populated by Node 1 (Regional Researcher)."""
     ticker: str
     name: str
-    region: str           # "US" | "HKCN" | "BSE"
-    market: str           # "NASDAQ" | "NYSE" | "NSE" | "HKEX"
+    region: str           # "US" | "LSE" | "BSE" | "HKCN"
+    market: str           # "NASDAQ" | "NYSE" | "LSE" | "NSE" | "HKEX"
     category: str         # e.g. "core" | "thematic" | "India Large-Cap" | rationale
     expense_ratio: Optional[float]   # decimal (0.0007 = 0.07%)
     aum_b: Optional[float]
@@ -28,11 +28,11 @@ class ETFRecord(TypedDict):
     beta: Optional[float]                    # 1-year beta vs S&P 500
     dividend_yield: Optional[float]          # trailing annual dividend yield (decimal)
     current_price: Optional[float]
-    currency: str         # "USD" | "INR" | "HKD"
+    currency: str         # "USD" | "GBP" | "INR" | "HKD"
     data_source: str      # "yfinance" | "gemini_estimate" | "fallback"
     fetch_error: Optional[str]
     # ── Cost & routing fields (added by Node 1) ───────────────────────
-    recommended_broker: str          # "Dhan" | "Alpaca" | "Tiger" | "IBKR"
+    recommended_broker: str          # "Dhan" | "Alpaca" | "ibkr_stub" | "IBKR"
     adv_usd: Optional[float]         # average daily volume in USD equivalent
     liquidity_ok: bool               # ADV >= $1M USD equivalent
     est_entry_cost_pct: Optional[float]   # (brokerage_min/500) + stamp_duty + TER/12
@@ -136,6 +136,11 @@ class SIPExecutionState(TypedDict):
     risk_violations: List[str]
     risk_audit_notes: str
     audit_retry_count: int
+    # Dynamic per-region caps — set by Node 4 based on VA tier per region.
+    # Keys are region strings (e.g. "BSE", "INTL"); values are max fractions of SIP.
+    # Tier 0 = base (0.50), Tier 1 dip = +0.10, Tier 2 crash = +0.20.
+    # Written by Node 4, read by Node 3 on audit retry.
+    per_region_caps: Optional[Dict[str, float]]
     # Value-Averaging fields (set by Node 4 when panic+floor condition fires)
     va_triggered: bool    # True when the 20% top-up was applied this month
     va_multiplier: float  # Actual multiplier used (1.0 = no adjustment; 1.20 = top-up)

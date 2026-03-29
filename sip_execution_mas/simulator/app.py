@@ -652,14 +652,14 @@ if st.session_state.get("bt_mode"):
         st.subheader("Month-by-Month Details")
         for _entry in reversed(r["monthly_entries"]):
             _scorer_badge = "🤖 Gemini" if _entry.get("scorer") == "gemini" else "📊 VADER"
-            _va_triggered = _entry.get("va_triggered", False)
-            _va_mult      = _entry.get("va_multiplier", 1.0)
-            _eff_sip      = _entry.get("effective_sip", _entry["sip_amount"])
-            _va_badge     = f"  ·  ⚡ VA x{_va_mult:.2f}" if _va_triggered else ""
+            _va_triggered    = _entry.get("va_triggered", False)
+            _va_mult         = _entry.get("va_multiplier", 1.0)
+            _va_badge        = f"  ·  ⚡ VA x{_va_mult:.2f}" if _va_triggered else ""
+            _actual_invested = sum(p["monthly_usd"] for p in _entry["positions"])
             with st.expander(
                 "**{}**  ·  {}  ·  {}{}  ·  {} positions  ·  {}".format(
                     _entry["month"], _entry["date"],
-                    _usd(_eff_sip), _va_badge,
+                    _usd(_actual_invested), _va_badge,
                     len(_entry["positions"]), _scorer_badge,
                 )
             ):
@@ -667,7 +667,7 @@ if st.session_state.get("bt_mode"):
                     st.info(
                         f"⚡ **Crash-Accumulator VA fired** — "
                         f"Base SIP: {_usd(_entry['sip_amount'])}  →  "
-                        f"Effective SIP: {_usd(_eff_sip)}  (x{_va_mult:.2f})"
+                        f"Effective SIP: {_usd(_actual_invested)}  (x{_va_mult:.2f})"
                     )
                 st.dataframe(pd.DataFrame([
                     {
@@ -891,14 +891,14 @@ with tab_history:
     st.subheader(f"All Investment Records ({summary['months']} months)")
 
     for entry in reversed(ledger.get("entries", [])):
-        _e_va      = entry.get("va_triggered", False)
-        _e_va_mult = entry.get("va_multiplier", 1.0)
-        _e_eff_sip = entry.get("effective_sip", entry.get("sip_amount", entry["total_invested_usd"]))
-        _e_scorer  = "🤖 Gemini" if entry.get("scorer") == "gemini" else "📊 VADER"
-        _e_va_tag  = f"  ·  ⚡ VA x{_e_va_mult:.2f}" if _e_va else ""
+        _e_va       = entry.get("va_triggered", False)
+        _e_va_mult  = entry.get("va_multiplier", 1.0)
+        _e_invested = entry.get("total_invested_usd", sum(p["monthly_usd"] for p in entry["positions"]))
+        _e_scorer   = "🤖 Gemini" if entry.get("scorer") == "gemini" else "📊 VADER"
+        _e_va_tag   = f"  ·  ⚡ VA x{_e_va_mult:.2f}" if _e_va else ""
         with st.expander(
             f"**{entry['month']}**  ·  {entry['date']}  ·  "
-            f"${_e_eff_sip:.2f} invested{_e_va_tag}  ·  "
+            f"${_e_invested:.2f} invested{_e_va_tag}  ·  "
             f"{len(entry['positions'])} positions  ·  "
             f"USD/INR: {entry['usd_inr_rate']:.2f}  ·  {_e_scorer}"
         ):
@@ -906,7 +906,7 @@ with tab_history:
                 st.info(
                     f"⚡ **Crash-Accumulator VA** — "
                     f"Base: {_usd(entry.get('sip_amount', 0))}  →  "
-                    f"Effective: {_usd(_e_eff_sip)}  (x{_e_va_mult:.2f})"
+                    f"Effective: {_usd(_e_invested)}  (x{_e_va_mult:.2f})"
                 )
             pos_rows = [
                 {
@@ -925,14 +925,16 @@ with tab_history:
             st.dataframe(pd.DataFrame(pos_rows), hide_index=True, use_container_width=True)
             _boom = entry.get("boom_triggers", [])
             _macro = entry.get("macro_summary", "")
+            _actual_core = sum(p["monthly_usd"] for p in entry["positions"] if p.get("bucket") == "core")
+            _actual_sat  = sum(p["monthly_usd"] for p in entry["positions"] if p.get("bucket") == "satellite")
             st.caption(
                 f"Rankings generated: {entry.get('rankings_generated_at', '—')}  ·  "
-                f"Core: {_usd(entry.get('core_budget', 0))}  ·  "
-                f"Satellite: {_usd(entry.get('satellite_budget', 0))}"
+                f"Core: {_usd(_actual_core)}  ·  "
+                f"Satellite: {_usd(_actual_sat)}"
                 + (f"  ·  Boom: {', '.join(_boom)}" if _boom else "")
             )
             if _macro:
-                st.caption(_macro[:200])
+                st.caption(_macro)
 
     st.divider()
     st.download_button(
@@ -949,24 +951,27 @@ with tab_history:
 
 with tab_allocation:
     last_entry = ledger["entries"][-1]
-    _la_va      = last_entry.get("va_triggered", False)
-    _la_va_mult = last_entry.get("va_multiplier", 1.0)
-    _la_eff_sip = last_entry.get("effective_sip", last_entry.get("sip_amount", 0))
-    _la_scorer  = last_entry.get("scorer", "vader")
+    _la_va        = last_entry.get("va_triggered", False)
+    _la_va_mult   = last_entry.get("va_multiplier", 1.0)
+    _la_invested  = last_entry.get("total_invested_usd", sum(p["monthly_usd"] for p in last_entry["positions"]))
+    _la_scorer    = last_entry.get("scorer", "vader")
     st.subheader(f"Allocation from {last_entry['month']}  ({last_entry['date']})")
+
+    core_pos = [p for p in last_entry["positions"] if p["bucket"] == "core"]
+    sat_pos  = [p for p in last_entry["positions"] if p["bucket"] == "satellite"]
+    _actual_core_la = sum(p["monthly_usd"] for p in core_pos)
+    _actual_sat_la  = sum(p["monthly_usd"] for p in sat_pos)
+
     st.caption(
         f"Rankings: {last_entry.get('rankings_generated_at', '—')}  ·  "
         f"Scorer: {'Gemini' if _la_scorer == 'gemini' else 'VADER'}  ·  "
         f"Base SIP: {_usd(last_entry.get('sip_amount', 0))}  ·  "
-        f"Effective SIP: {_usd(_la_eff_sip)}  ·  "
-        f"Core: {_usd(last_entry.get('core_budget', 0))} / "
-        f"Satellite: {_usd(last_entry.get('satellite_budget', 0))}"
+        f"Effective SIP: {_usd(_la_invested)}  ·  "
+        f"Core: {_usd(_actual_core_la)} / "
+        f"Satellite: {_usd(_actual_sat_la)}"
     )
     if _la_va:
         st.warning(f"⚡ **Crash-Accumulator VA fired this month** — x{_la_va_mult:.2f} multiplier applied")
-
-    core_pos = [p for p in last_entry["positions"] if p["bucket"] == "core"]
-    sat_pos  = [p for p in last_entry["positions"] if p["bucket"] == "satellite"]
 
     def _alloc_table(positions):
         return pd.DataFrame([
@@ -986,11 +991,11 @@ with tab_allocation:
         ])
 
     if core_pos:
-        st.markdown(f"**★ Core** — {_usd(last_entry.get('core_budget', 0))}/month")
+        st.markdown(f"**★ Core** — {_usd(_actual_core_la)} deployed")
         st.dataframe(_alloc_table(core_pos), hide_index=True, use_container_width=True)
 
     if sat_pos:
-        st.markdown(f"**◈ Satellite** — {_usd(last_entry.get('satellite_budget', 0))}/month")
+        st.markdown(f"**◈ Satellite** — {_usd(_actual_sat_la)} deployed")
         st.dataframe(_alloc_table(sat_pos), hide_index=True, use_container_width=True)
 
     # Allocation donut from last entry
@@ -1107,15 +1112,15 @@ with tab_va:
     _all_entries = ledger.get("entries", [])
     _va_rows = []
     for _e in _all_entries:
+        _e_base     = _e.get("sip_amount", 0)
+        _e_actual   = _e.get("total_invested_usd", sum(p["monthly_usd"] for p in _e["positions"]))
         _va_rows.append({
             "Month":          _e["month"],
-            "Base SIP ($)":   _e.get("sip_amount", 0),
-            "Effective ($)":  _e.get("effective_sip", _e.get("sip_amount", 0)),
+            "Base SIP ($)":   _e_base,
+            "Effective ($)":  _e_actual,
             "VA Triggered":   "Yes" if _e.get("va_triggered") else "No",
             "Multiplier":     _e.get("va_multiplier", 1.0),
-            "Extra Deployed": round(
-                _e.get("effective_sip", _e.get("sip_amount", 0)) - _e.get("sip_amount", 0), 2
-            ),
+            "Extra Deployed": round(_e_actual - _e_base, 2),
             "Scorer":         "Gemini" if _e.get("scorer") == "gemini" else "VADER",
         })
 
@@ -1125,10 +1130,10 @@ with tab_va:
         # Stacked bar: base SIP + extra (VA top-up) per month
         _fig_va = go.Figure()
         _fig_va.add_trace(go.Bar(
-            x=_va_df["Month"], y=_va_df["Base SIP ($)"],
+            x=_va_df["Month"], y=_va_df["Effective ($)"],
             name="Base SIP",
             marker_color=CORE_COLOR,
-            hovertemplate="<b>%{x}</b><br>Base SIP: $%{y:,.2f}<extra></extra>",
+            hovertemplate="<b>%{x}</b><br>Invested: $%{y:,.2f}<extra></extra>",
         ))
         _va_extra_series = _va_df["Extra Deployed"].clip(lower=0)
         _fig_va.add_trace(go.Bar(
@@ -1157,8 +1162,8 @@ with tab_va:
         _vc1, _vc2, _vc3, _vc4 = st.columns(4)
         _vc1.metric("VA Months", str(_total_va_months))
         _vc2.metric("Extra Capital Deployed", _usd(_total_va_extra))
-        _vc3.metric("Base SIP Total", _usd(_total_base))
-        _vc4.metric("Effective Total", _usd(_total_eff))
+        _vc3.metric("Planned SIP Total", _usd(_total_base))
+        _vc4.metric("Actual Invested", _usd(_total_eff))
 
         # Scorer breakdown
         _gemini_months = int(_va_df["Scorer"].eq("Gemini").sum())

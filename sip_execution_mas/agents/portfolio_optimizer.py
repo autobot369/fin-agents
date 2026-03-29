@@ -57,14 +57,14 @@ EVICTION_THRESHOLD = 0.30
 # for money-market / ultra-low-vol ETFs such as LIQUIDBEES.NS).
 _VOL_FLOOR = 0.05   # 5% annualised
 
-# ── Locked production universe — 12 ETFs in two permanent buckets ─────────────
+# ── Locked production universe — 5 ETFs in two permanent buckets (v4 — Tax Optimised) ──
 # When filtered_tickers ⊆ _LOCKED_TICKERS the optimizer uses a fixed core/sat
 # bucket split instead of sticky-select + rank-based compute_allocation.
 _CORE_TICKERS      = frozenset([
-    "USCA", "SPDW", "SPEM", "FLIN", "NIFTYBEES.NS",
+    "VWRA.L", "NIFTYBEES.NS",
 ])
 _SATELLITE_TICKERS = frozenset([
-    "SOXQ", "XLK", "AVUV", "URNM", "CIBR", "SMIN", "XBI",
+    "IUIT.L", "WSML.L", "MOM100.NS",
 ])
 _LOCKED_TICKERS = _CORE_TICKERS | _SATELLITE_TICKERS
 _BUCKET_SPLIT   = 0.70   # core fraction of total SIP
@@ -345,16 +345,56 @@ def _apply_violation_caps(
     plan: Dict[str, Any],
     violations: List[str],
     max_position_pct: float,
+    per_region_caps: Dict[str, float],
     max_region_pct: float,
     sip_amount: float,
+    dust_tickers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Post-process the allocation plan to enforce caps that were flagged
     by the Risk Auditor in a previous attempt.
+
+    per_region_caps: region → max fraction of SIP (dynamic, set by Node 4).
+                     Falls back to max_region_pct for any region not present.
+    dust_tickers: tickers flagged by Rule 6 (MIN_LOT_SIZE < $30). Their
+                  budgets are redistributed to the largest non-dust positions
+                  proportional to consensus_score before other caps are applied.
     """
     all_positions = plan.get("all", [])
     if not all_positions:
         return plan
+
+    def _region_cap_usd(region: str) -> float:
+        return round(per_region_caps.get(region, max_region_pct) * sip_amount, 2)
+
+    # Rule 6 consolidation: drop dust positions and redistribute their budget
+    dust_set = set(dust_tickers or [])
+    # Also catch any RULE_6_VIOLATION tickers that weren't passed explicitly
+    for v in violations:
+        if v.startswith("RULE_6_VIOLATION:"):
+            ticker_part = v.split("RULE_6_VIOLATION:")[1].strip().split(" ")[0]
+            dust_set.add(ticker_part)
+
+    if dust_set:
+        dust_positions  = [p for p in all_positions if p["ticker"] in dust_set]
+        keep_positions  = [p for p in all_positions if p["ticker"] not in dust_set]
+        rescued_usd     = sum(p["monthly_usd"] for p in dust_positions)
+
+        if keep_positions and rescued_usd > 0:
+            # Redistribute to the non-dust positions, proportional to consensus_score
+            total_score = sum(p.get("consensus_score", 0.5) for p in keep_positions) or len(keep_positions) * 0.5
+            distributed = 0.0
+            for pos in keep_positions:
+                share = round(rescued_usd * (pos.get("consensus_score", 0.5) / total_score), 2)
+                pos["monthly_usd"] = round(pos["monthly_usd"] + share, 2)
+                distributed += share
+            # Fix rounding drift — assign remainder to the largest position
+            drift = round(rescued_usd - distributed, 2)
+            if abs(drift) >= 0.01:
+                largest = max(keep_positions, key=lambda p: p["monthly_usd"])
+                largest["monthly_usd"] = round(largest["monthly_usd"] + drift, 2)
+
+        all_positions = keep_positions
 
     # Enforce per-position cap
     position_cap_usd = sip_amount * max_position_pct
@@ -362,27 +402,63 @@ def _apply_violation_caps(
         if pos["monthly_usd"] > position_cap_usd:
             pos["monthly_usd"] = round(position_cap_usd, 2)
 
-    # Enforce per-region cap
-    region_totals: Dict[str, float] = {}
-    for pos in all_positions:
-        r = pos.get("region", "INTL")
-        region_totals[r] = region_totals.get(r, 0) + pos["monthly_usd"]
+    # Enforce per-region cap (dynamic)
+    for _pass in range(2):  # two passes: cap, then redistribute surplus
+        region_totals: Dict[str, float] = {}
+        for pos in all_positions:
+            r = pos.get("region", "INTL")
+            region_totals[r] = region_totals.get(r, 0) + pos["monthly_usd"]
 
-    region_cap_usd = sip_amount * max_region_pct
-    for region, total in region_totals.items():
-        if total > region_cap_usd:
-            scale = region_cap_usd / total
-            region_positions = [p for p in all_positions if p.get("region") == region]
-            for pos in region_positions:
-                pos["monthly_usd"] = round(pos["monthly_usd"] * scale, 2)
-            # Snap rounding drift so the region total never exceeds the cap
-            drift = round(sum(p["monthly_usd"] for p in region_positions) - region_cap_usd, 2)
-            if drift > 0 and region_positions:
-                largest = max(region_positions, key=lambda p: p["monthly_usd"])
-                largest["monthly_usd"] = round(largest["monthly_usd"] - drift, 2)
+        for region, total in region_totals.items():
+            cap = _region_cap_usd(region)
+            if total > cap:
+                scale = cap / total
+                region_positions = [p for p in all_positions if p.get("region") == region]
+                for pos in region_positions:
+                    pos["monthly_usd"] = round(pos["monthly_usd"] * scale, 2)
+                # Snap rounding drift so region total never exceeds cap
+                drift = round(sum(p["monthly_usd"] for p in region_positions) - cap, 2)
+                if drift > 0 and region_positions:
+                    largest = max(region_positions, key=lambda p: p["monthly_usd"])
+                    largest["monthly_usd"] = round(largest["monthly_usd"] - drift, 2)
+
+        # Redistribute any undeployed surplus to undercapped regions,
+        # proportional to each position's current consensus_score.
+        total_deployed = sum(p["monthly_usd"] for p in all_positions)
+        surplus = round(sip_amount - total_deployed, 2)
+        if surplus <= 0.01:
+            break
+
+        region_totals = {}
+        for pos in all_positions:
+            r = pos.get("region", "INTL")
+            region_totals[r] = region_totals.get(r, 0) + pos["monthly_usd"]
+
+        # Distribute surplus to positions with headroom under both caps
+        remaining = surplus
+        for _iter in range(10):
+            eligible = [
+                p for p in all_positions
+                if region_totals.get(p.get("region", "INTL"), 0) < _region_cap_usd(p.get("region", "INTL")) - 0.01
+                and p["monthly_usd"] < position_cap_usd - 0.01
+            ]
+            if not eligible or remaining <= 0.01:
+                break
+            total_score = sum(p.get("consensus_score", 0.5) for p in eligible) or len(eligible) * 0.5
+            distributed = 0.0
+            for pos in eligible:
+                headroom = round(position_cap_usd - pos["monthly_usd"], 2)
+                share = round(remaining * (pos.get("consensus_score", 0.5) / total_score), 2)
+                add = min(share, headroom)
+                pos["monthly_usd"] = round(pos["monthly_usd"] + add, 2)
+                distributed += add
+                r = pos.get("region", "INTL")
+                region_totals[r] = region_totals.get(r, 0) + add
+            remaining = round(remaining - distributed, 2)
+            if distributed < 0.01:
+                break
 
     # Recompute weights
-    total_invested = sum(p["monthly_usd"] for p in all_positions)
     for pos in all_positions:
         pos["weight"] = round(pos["monthly_usd"] / sip_amount, 4) if sip_amount else 0
 
@@ -398,8 +474,8 @@ def portfolio_optimizer_node(state: SIPExecutionState) -> dict:
 
     Locked-universe path (production):
       filtered_tickers ⊆ _LOCKED_TICKERS → fixed 70/30 bucket split.
-      Core (70%): VTI, SPLG, SPDW, SPEM, FLIN, NIFTYBEES.NS, QUAL — always all 7.
-      Satellite (30%): XLK, QQQM, SOXQ, ICLN, USCA, ESGV, XLY — always all 7,
+      Core (70%): VWRA.L, NIFTYBEES.NS — always both, sentiment-weighted.
+      Satellite (30%): IUIT.L, WSML.L, MOM100.NS — always all 3,
         sentiment-weighted so macro cycle rotates capital between them.
 
     Legacy path (backtest):
@@ -499,11 +575,20 @@ def portfolio_optimizer_node(state: SIPExecutionState) -> dict:
             core_pct    = core_pct,
         )
 
-    # 2. If retry, apply hard caps to fix previous violations
+    # 2. If retry, apply hard caps to fix previous violations.
+    #    Use per_region_caps from Node 4 (dynamic dip-aware caps) if available.
     if audit_retry > 0 and violations:
+        per_region_caps: Dict[str, float] = state.get("per_region_caps") or {}
+        dust_tickers: List[str] = state.get("dust_tickers") or []
         print(f"  [Node 3] Applying hard caps to fix {len(violations)} violation(s) …")
+        if per_region_caps:
+            cap_summary = ", ".join(f"{r} {v*100:.0f}%" for r, v in sorted(per_region_caps.items()))
+            print(f"  [Node 3] Per-region caps: {cap_summary}")
+        if dust_tickers:
+            print(f"  [Node 3] Rule 6 consolidation — dropping dust: {dust_tickers}")
         plan = _apply_violation_caps(
-            plan, violations, max_position_pct, max_region_pct, sip_amount
+            plan, violations, max_position_pct, per_region_caps, max_region_pct, sip_amount,
+            dust_tickers=dust_tickers,
         )
 
     # 3. Fetch Gemini rationales

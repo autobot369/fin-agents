@@ -99,8 +99,8 @@ def execute_monthly_investment(
         core_count    = core_count,
         core_pct      = core_pct,
         ter_threshold = ter_threshold,
-        max_position_pct = 0.15,
-        max_region_pct   = 0.50,
+        max_position_pct = 0.50,   # v4: 5-ETF universe, core ETFs each hold ~35%
+        max_region_pct   = 0.80,   # v4: LSE-heavy universe (3 of 5 ETFs on LSE)
         dry_run       = not live,
         force         = force,
         ledger_path   = ledger_path,

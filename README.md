@@ -10,7 +10,7 @@ A collection of independent multi-agent systems (MAS) for financial research, ET
 |--------|-----|---------|
 | [ticker-research-mas](#ticker-research-mas) | Claude Opus 4.6 | Bull vs Bear debate + arbitrated stock forecast |
 | [etf-selection-mas](#etf-selection-mas) | Claude Sonnet 4.6 | Global ETF Top-20 ranking across 3 markets |
-| [sip-execution-mas](#sip-execution-mas) | Gemini 2.0 Flash | Monthly SIP execution with risk auditing |
+| [sip-execution-mas](#sip-execution-mas) | Gemini 2.5 Flash | Monthly SIP execution with risk auditing |
 
 ---
 
@@ -110,28 +110,29 @@ researcher → scorer → optimizer → auditor
                           abort    → logger (exits after 2 retries)
 ```
 
-**Fixed universe — two permanent buckets (v3):**
+**Fixed universe — two permanent buckets (v4):**
 
-| Bucket | Tickers | Budget |
-|--------|---------|--------|
-| **Core** (low-cost beta anchors) | USCA, SPDW, SPEM, FLIN, NIFTYBEES.NS | 70% of SIP |
-| **Satellite** (thematic growth) | SOXQ, XLK, AVUV, URNM, CIBR, SMIN, XBI | 30% of SIP |
+| Bucket | Tickers | Budget | Broker |
+|--------|---------|--------|--------|
+| **Core** (low-cost beta anchors) | USCA, SPDW, SPEM, JUNIORBEES.NS, NIFTYBEES.NS | 70% of SIP | Alpaca (US) · Dhan (NSE) |
+| **Satellite** (thematic growth) | SOXQ, XLK, AVUV, URNM, CIBR, MOM100.NS, XBI | 30% of SIP | Alpaca (US) · Dhan (NSE) |
 
-Gemini sentiment rotates *how much* each satellite ETF receives — no ETF is ever dropped. Universe is identical in production and backtest; no Gemini discovery calls.
+India ETFs (`JUNIORBEES.NS`, `NIFTYBEES.NS`, `MOM100.NS`) trade directly on NSE via Dhan — zero brokerage, no NASDAQ proxies. Gemini sentiment rotates *how much* each satellite ETF receives; no ETF is ever dropped. Universe is identical in production and backtest.
 
 **Node 1 — data payload per ETF:**
 - **Hard fundamentals:** `fwdPE`, `beta`, `dividend_yield`, `momentum_3m`, `ytd_return`, `trailing_volatility_3m`, `TER`
 - **Thematic news (5 categories, 2 DDGS queries each):** `TECH_SEMIS` · `INDIA_EM` · `URANIUM_ENERGY` · `BIOTECH` · `QUALITY_CORE`
 
-**Node 2 — 10-year horizon macro strategist (Gemini):**
-Each ETF is evaluated via a structured block pairing `[Fundamentals]` (valuation anchor) with `[Sector News — CATEGORY]` (capital-flow catalysts). Scoring rules: P/E ceilings (>40x tech → max 0.75), beta regime scaling, dividend quality signal, structural-vs-cyclical distinction. Falls back to category-aware VADER if Gemini is unavailable.
+**Node 2 — 10-year horizon macro strategist (Gemini 2.5 Flash):**
+Each ETF is evaluated via a structured block pairing `[Fundamentals]` (valuation anchor) with `[Sector News — CATEGORY]` (capital-flow catalysts). Scoring rules: P/E ceilings (>40x tech → max 0.75), beta regime scaling (satellite ETFs are NOT penalised for high beta in risk-off), dividend quality signal, structural-vs-cyclical distinction. Falls back to category-aware VADER if Gemini is unavailable.
 
 **Usage:**
 ```bash
 cd sip_execution_mas
 pip install -r requirements.txt
 
-python -m sip_execution_mas                  # Dry-run, $500 SIP
+# Always set UTF-8 flags on Windows to avoid Unicode errors
+PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python -m sip_execution_mas.simulator.scheduler --now --sip 500
 python -m sip_execution_mas --sip 750        # Custom SIP amount
 python -m sip_execution_mas --live           # Live Alpaca trading
 python -m sip_execution_mas --force          # Bypass same-month rule
@@ -144,7 +145,7 @@ python -m sip_execution_mas --force          # Bypass same-month rule
 | `--sip` | `500` | Monthly SIP budget in USD |
 | `--ter` | `0.70` | TER % used in expense scoring (all 12 ETFs always included) |
 | `--max-position` | `0.15` | Max single-ETF allocation (fraction) |
-| `--max-region` | `0.50` | Max single-region allocation (fraction) |
+| `--max-region` | `0.50` | Base max single-region allocation (fraction) — dynamically raised during dips |
 | `--live` | off | Enable live Alpaca order submission |
 | `--force` | off | Bypass same-month duplicate check |
 
@@ -165,12 +166,23 @@ allocation_i     = weight_i × bucket_budget
 
 **Value-Averaging multiplier (Node 4 — Crash Accumulator):**
 When Gemini signals panic sentiment AND negative momentum, the SIP scales up automatically:
-- **Tier 1** (momentum > −15%): `effective_sip = sip × 1.20`
-- **Tier 2** (momentum ≤ −15%): `effective_sip = sip × 1.50`
+- **Tier 1** (dip, momentum between −15% and 0%): `effective_sip = sip × 1.20`
+- **Tier 2** (crash, momentum ≤ −15%): `effective_sip = sip × 1.50`
+
+**Dynamic per-region caps (Node 4):**
+The `max_region_pct` cap is adjusted **per region** based on each region's own VA tier. This lets the system deploy more capital into a region that is specifically in a dip while keeping other regions at the base cap.
+
+| Region condition | Cap adjustment |
+|-----------------|---------------|
+| No panic / positive momentum | Base cap (e.g. 50%) |
+| Tier 1 dip (avg 3m momentum −15%…0%) | Base + 10 pp (e.g. 60%) |
+| Tier 2 crash (avg 3m momentum ≤ −15%) | Base + 20 pp (e.g. 70%) |
+
+Example: BSE crashing (avg mom −20%) while INTL is flat → BSE cap lifts to 70%, INTL stays at 50%. Surplus capital that would otherwise be left undeployed flows into the dipping region.
 
 **5 hard risk rules (auditor):**
 1. No single ETF > `max_position_pct × SIP`
-2. No single region > `max_region_pct × SIP`
+2. No single region > dynamic per-region cap (Tier 0/1/2 based on region momentum)
 3. No ETF allocation < $1.00
 4. No duplicate entry for current month (bypass with `--force`)
 5. At least 1 proposed order
@@ -181,11 +193,11 @@ When Gemini signals panic sentiment AND negative momentum, the SIP scales up aut
 |------|-----------|----------|
 | Paper | default | Simulates fills at yfinance close price |
 | Alpaca | `--live` + `ALPACA_API_KEY` set | Real MarketOrderRequest (US ETFs only) |
-| Dhan | `.NS` / `.BO` tickers | Always paper (stub) |
+| Dhan | `.NS` tickers | Zero-brokerage NSE execution (live stub — Dhan SDK integration) |
 
 **Outputs:**
-- `outputs/execution_log.csv` — Per-order audit trail
-- `simulator/outputs/portfolio_ledger.json` — Cumulative portfolio state
+- `outputs/execution_log.csv` — Per-order audit trail (one row per ETF per run)
+- `simulator/outputs/portfolio_ledger.json` — Cumulative portfolio state (one entry per calendar month)
 
 **Simulator sub-package:**
 
@@ -198,10 +210,18 @@ python -m simulator.scheduler
 python -m simulator.scheduler --now      # Immediate one-off run
 
 # Interactive portfolio dashboard
-streamlit run sip_execution_mas/simulator/app.py
+python -m streamlit run sip_execution_mas/simulator/app.py
+# or
+PYTHONUTF8=1 python -m streamlit run sip_execution_mas/simulator/app.py  # Windows
 ```
 
-**Env vars:** `GEMINI_API_KEY` (recommended — falls back to VADER) · `ALPACA_API_KEY` + `ALPACA_SECRET_KEY` (optional, live trading) · `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` (optional, future)
+**Windows Task Scheduler:**
+A `SIP_Monthly` task is registered via PowerShell (runs every 4 weeks on Monday at 09:00 via `run_monthly_sip.bat`).
+
+**Oracle Cloud deployment (planned):**
+Scripts at `sip_execution_mas/deploy/` — one-time setup for an Always Free `VM.Standard.A1.Flex` VM with persistent ledger storage and monthly cron job.
+
+**Env vars:** `GEMINI_API_KEY` (recommended — falls back to VADER) · `ALPACA_API_KEY` + `ALPACA_SECRET_KEY` (optional, live trading) · `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` (optional, NSE live)
 
 ---
 

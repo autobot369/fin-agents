@@ -1,0 +1,75 @@
+name: Monthly SIP Paper Trade
+
+on:
+  schedule:
+    # 1st of every month at 04:00 UTC (09:30 IST — after NSE open)
+    - cron: '0 4 1 * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force re-investment even if already done this month'
+        type: boolean
+        default: false
+      sip_amount:
+        description: 'Monthly SIP amount in USD'
+        default: '500'
+
+permissions:
+  contents: write   # needed to commit ledger + execution log back
+
+jobs:
+  sip-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: sip_execution_mas/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r sip_execution_mas/requirements.txt
+
+      - name: Run monthly SIP (paper mode)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          FORCE_FLAG=""
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+          SIP="${{ github.event.inputs.sip_amount }}"
+          SIP="${SIP:-500}"
+
+          python -m sip_execution_mas.simulator.scheduler \
+            --now \
+            --sip "$SIP" \
+            $FORCE_FLAG
+
+      - name: Commit updated ledger and execution log
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            sip_execution_mas/simulator/outputs/portfolio_ledger.json \
+            sip_execution_mas/outputs/execution_log.csv \
+            || true
+
+          # Only commit if something actually changed
+          if git diff --cached --quiet; then
+            echo "No changes to commit — investment may have already been recorded this month."
+          else
+            RUN_DATE=$(date +%Y-%m-%d)
+            git commit -m "chore: SIP paper run ${RUN_DATE} [skip ci]"
+            git push
+          fi

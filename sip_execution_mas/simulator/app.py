@@ -77,7 +77,7 @@ def _color_val(val: Any) -> str:
     return ""
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60)
 def _load_ledger_cached(path: str) -> Dict[str, Any]:
     return load_ledger(path)
 

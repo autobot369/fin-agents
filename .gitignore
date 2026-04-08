@@ -20,8 +20,9 @@ env/
 .env_dir/
 
 # ── Outputs (generated data — not source code) ───────────────────────────────
-sip_execution_mas/simulator/outputs/portfolio_ledger.json
-sip_execution_mas/outputs/execution_log.csv
+# NOTE: SIP ledger + CSV are tracked so GitHub Actions paper-trade history persists
+# sip_execution_mas/simulator/outputs/portfolio_ledger.json  ← tracked
+# sip_execution_mas/outputs/execution_log.csv               ← tracked
 etf-selection-mas/outputs/TOP_20_BOOM_REPORT.md
 etf-selection-mas/outputs/rankings.json
 

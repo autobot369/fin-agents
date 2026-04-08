@@ -64,7 +64,7 @@ _TICKER_CATEGORY: Dict[str, str] = {
     "VWRA.L":       "QUALITY_CORE",
     "NIFTYBEES.NS": "INDIA_EM",
     "IUIT.L":       "TECH_SEMIS",
-    "VVSM.L":       "QUALITY_CORE",
+    "WSML.L":       "QUALITY_CORE",
     "MOM100.NS":    "INDIA_EM",
 }
 
@@ -141,7 +141,7 @@ Scoring framework — apply these rules IN ORDER:
      For CORE ETFs (VWRA.L — global all-world UCITS; NIFTYBEES.NS — India Nifty 50):
        Beta > 1.3 in a risk-off macro environment → reduce score by 0.05–0.10.
        Beta < 0.8 in a risk-off environment → increase score by 0.05 (defensive benefit confirmed).
-     For SATELLITE ETFs (IUIT.L — S&P 500 tech UCITS; VVSM.L — US small-cap UCITS; MOM100.NS — India midcap):
+     For SATELLITE ETFs (IUIT.L — S&P 500 tech UCITS; WSML.L — World small-cap UCITS; MOM100.NS — India midcap):
        Do NOT penalize high beta during macro panics or risk-off regimes.
        If beta > 1.3 AND sector news confirms the structural tailwind is INTACT
        (AI capex cycle, EM manufacturing rotation, India growth, etc.),

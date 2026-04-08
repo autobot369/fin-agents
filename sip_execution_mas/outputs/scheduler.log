@@ -1,0 +1,88 @@
+ 
+============================================================ 
+[30-03-2026  9:00:00.39] Monthly SIP triggered 
+============================================================ 
+C:\Users\Admin\AppData\Roaming\Python\Python314\site-packages\langchain_core\_api\deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+  from pydantic.v1.fields import FieldInfo as FieldInfoV1
+C:\Users\Admin\fin-agents\sip_execution_mas\agents\regional_researcher.py:281: RuntimeWarning: This package (`duckduckgo_search`) has been renamed to `ddgs`! Use `pip install ddgs` instead.
+  with DDGS() as ddgs:
+C:\Users\Admin\fin-agents\sip_execution_mas\agents\signal_scorer.py:24: FutureWarning: 
+
+All support for the `google.generativeai` package has ended. It will no longer be receiving 
+updates or bug fixes. Please switch to the `google.genai` package as soon as possible.
+See README for more details:
+
+https://github.com/google-gemini/deprecated-generative-ai-python/blob/main/README.md
+
+  import google.generativeai as genai
+
+============================================================
+  SIP SCHEDULER  —  Monthly Investment Run (via MAS)
+  2026-03-30 09:00:00
+============================================================
+
+[Node 1] Building locked 5-ETF universe v4 …
+[Node 1] 5 ETFs ready v4 (2 core + 3 satellite)
+
+[Node 2] Signal Scorer — scoring 5 ETFs …
+  [scorer] Scores via Gemini
+  [scorer] Boom triggers: AI_CAPEX_CYCLE, SEMICONDUCTOR_UPCYCLE, INDIA_GROWTH
+  [scorer] Macro: The next decade is poised for significant capital expenditure in AI and data centers, driving a secular growth cycle in 
+
+[Node 3] Portfolio Optimizer — building allocation …
+  [Node 3] Locked 70/30 — core 2 ($350.00) + satellite 3 ($150.00)
+  [Node 3] Proposed 5 orders
+  [Node 3] Core 2 ($350.00) + Satellite 3 ($150.00)
+
+[Node 4] Risk Auditor — auditing 5 orders …
+  [Node 4] Region BSE: cap 80% (no dip)
+  [Node 4] Region LSE: cap 80% (no dip)
+  [Node 4] ✓ APPROVED — all risk checks passed
+  [Node 4] Value-Averaging: not triggered (panic=False, momentum=positive or no data)
+
+[Node 5] Broker Connector — DRY RUN mode, 5 orders …
+  [Node 5] USD/INR = 94.76  |  GBP/USD = 1.3254
+  [Node 5]   VWRA.L                  162.4
+  [Node 5]   NIFTYBEES.NS            258.89
+  [Node 5]   IUIT.L                  37.21
+  [Node 5]   WSML.L                  9.057
+  [Node 5]   MOM100.NS               58.38
+  [Node 5] Filled: 5  Skipped: 0  Errors: 0  Total: $499.99
+
+[Node 6] Execution Logger — run_id=90A70D7A
+  [Node 6] Ledger updated → C:\Users\Admin\fin-agents\sip_execution_mas\simulator\outputs\portfolio_ledger.json
+  [Node 6] Execution log → C:\Users\Admin\fin-agents\sip_execution_mas\outputs\execution_log.csv
+
+================================================================
+  SIP EXECUTION MAS  —  Run 90A70D7A
+  2026-03-30 09:00:46
+  Status : DRY_RUN
+================================================================
+
+  #   Ticker                 Bkt       Price      Units      USD
+  ────────────────────────────────────────────────────────────────
+  1   VWRA.L                 COR      162.40 USD      1.1997   $194.83
+  2   NIFTYBEES.NS           COR      258.89 INR     56.7960   $155.17
+  3   IUIT.L                 SAT       37.21 USD      1.6213    $60.33
+  4   WSML.L                 SAT        9.06 USD      5.0480    $45.72
+  5   MOM100.NS              SAT       58.38 INR     71.3216    $43.94
+  ────────────────────────────────────────────────────────────────
+  Total invested this month : $499.99
+  USD/INR rate              : 94.76
+  Ledger total (all months) : $999.99 over 2 month(s)
+  Scorer: gemini
+
+  Macro: The next decade is poised for significant capital expenditure in AI and data centers, driving a secular growth cycle in 
+  Boom triggers: AI_CAPEX_CYCLE, SEMICONDUCTOR_UPCYCLE, INDIA_GROWTH
+  Audit: All risk checks passed. Portfolio approved.
+
+
+  [scheduler] MAS run complete — status: dry_run
+[30-03-2026  9:00:48.41] Done 
+ 
+============================================================ 
+[01-04-2026  9:00:15.45] Monthly SIP triggered 
+============================================================ 
+C:\Users\Admin\AppData\Roaming\Python\Python314\site-packages\langchain_core\_api\deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+  from pydantic.v1.fields import FieldInfo as FieldInfoV1
+^C

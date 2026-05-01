@@ -94,7 +94,101 @@
           "currency": "INR"
         }
       ]
+    },
+    {
+      "month": "2026-05",
+      "date": "2026-05-01",
+      "rankings_generated_at": "2026-05-01",
+      "usd_inr_rate": 94.88,
+      "sip_amount": 500.0,
+      "effective_sip": 500.0,
+      "va_triggered": false,
+      "va_multiplier": 1.0,
+      "scorer": "gemini",
+      "boom_triggers": [
+        "AI_CAPEX_CYCLE",
+        "SEMICONDUCTOR_UPCYCLE",
+        "INDIA_FII_INFLOWS",
+        "EM_SUPPLY_CHAIN_ROTATION"
+      ],
+      "macro_summary": "The next decade is poised for significant structural shifts driven by the accelerating AI capex cycle, which continues to fuel demand for advanced computing and data center infrastructure globally. Emerging markets, particularly India, are set for sustained growth, benefiting from favorable demographics, domestic consumption, and potential shifts in global supply chains. While short-term market fluctuations may occur, these powerful secular trends provide robust tailwinds for strategic capital allocation.",
+      "core_budget": 350.0,
+      "satellite_budget": 150.0,
+      "core_pct": 0.7,
+      "total_invested_usd": 500.0,
+      "positions": [
+        {
+          "ticker": "VWRA.L",
+          "name": "Vanguard FTSE All-World UCITS ETF",
+          "bucket": "core",
+          "region": "LSE",
+          "category": "global_all_world [USD \u2014 via IBKR]",
+          "trade_on": "LSE",
+          "consensus_score": 0.9483,
+          "weight": 0.34072,
+          "monthly_usd": 170.36,
+          "price_native": 180.62,
+          "units_bought": 0.943196,
+          "currency": "USD"
+        },
+        {
+          "ticker": "NIFTYBEES.NS",
+          "name": "Nippon India ETF Nifty 50 BeES",
+          "bucket": "core",
+          "region": "BSE",
+          "category": "india [INR \u2014 via Dhan]",
+          "trade_on": "NSE",
+          "consensus_score": 1.0,
+          "weight": 0.35928,
+          "monthly_usd": 179.64,
+          "price_native": 272.01,
+          "units_bought": 62.660355,
+          "currency": "INR"
+        },
+        {
+          "ticker": "IUIT.L",
+          "name": "iShares S&P 500 Tech Sector UCITS ETF",
+          "bucket": "satellite",
+          "region": "LSE",
+          "category": "technology [USD \u2014 via IBKR]",
+          "trade_on": "LSE",
+          "consensus_score": 0.9039,
+          "weight": 0.11126,
+          "monthly_usd": 55.63,
+          "price_native": 44.45,
+          "units_bought": 1.251519,
+          "currency": "USD"
+        },
+        {
+          "ticker": "WSML.L",
+          "name": "iShares MSCI World Small Cap UCITS ETF",
+          "bucket": "satellite",
+          "region": "LSE",
+          "category": "small_cap_value [USD \u2014 via IBKR]",
+          "trade_on": "LSE",
+          "consensus_score": 0.7867,
+          "weight": 0.09684,
+          "monthly_usd": 48.42,
+          "price_native": 9.95,
+          "units_bought": 4.866332,
+          "currency": "USD"
+        },
+        {
+          "ticker": "MOM100.NS",
+          "name": "Motilal Oswal Nifty Midcap 100 ETF",
+          "bucket": "satellite",
+          "region": "BSE",
+          "category": "india_midcap [INR \u2014 via Dhan]",
+          "trade_on": "NSE",
+          "consensus_score": 0.7466,
+          "weight": 0.0919,
+          "monthly_usd": 45.95,
+          "price_native": 64.35,
+          "units_bought": 67.750365,
+          "currency": "INR"
+        }
+      ]
     }
   ],
-  "last_updated": "2026-03-30T09:00:46.198509"
+  "last_updated": "2026-05-01T06:31:13.141630"
 }
